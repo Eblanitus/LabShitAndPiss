@@ -37,6 +37,11 @@ local EnemyStructures = require(ServerScriptService:WaitForChild("EnemyStructure
 local EnemyBody = require(ReplicatedStorage:WaitForChild("EnemyBody"))
 -- Скорость разворота тела: капсула доворачивает ровно так же, как видимый корпус.
 local EnemyGait = require(ReplicatedStorage:WaitForChild("EnemyGait"))
+-- Толпа на точках (план «Точечная физика жуков», шаг 1): решатель и его числа. Включается
+-- атрибутом Workspace.SoftCrowd поверх PhysicsFX.crowd.enabled, решается при Crowd.Add.
+local PhysicsFX = require(ReplicatedStorage:WaitForChild("PhysicsFX"))
+local CrowdSolver = require(ServerScriptService:WaitForChild("CrowdSolver"))
+local SOFT = PhysicsFX.crowd
 
 -- Каждый снимает свою половину перекрытия: вторую снимет сосед на своём же кадре. Единица
 -- вместо половины — это двойное исправление одной и той же пары, от него куча дрожит.
@@ -195,8 +200,24 @@ local function around(x, z, reach)
 	return found
 end
 
+-- Решатель толпы на точках (создаётся ниже, у groundAt) и снятие тела из него.
+-- Функции мягкой толпы объявлены здесь, а заданы ниже: им нужны groundAt и проверки границ.
+local solver
+local softEnabled, addSoft, resolveSoft, resolveRigid, noteRigid
+local function forgetSoft(record)
+	local b = record.soft
+	if b and solver then
+		record.soft = nil
+		local moved = solver:remove(b)
+		if moved then
+			moved.soft = b
+		end
+	end
+end
+
 -- Снять запись совсем: из списка, словаря и корзины.
 local function forget(record)
+	forgetSoft(record)
 	byModel[record.model] = nil
 	local index = table.find(records, record)
 	if index then
@@ -675,6 +696,9 @@ function Crowd.Add(model)
 	table.insert(records, record)
 	byModel[model] = record
 	place(record)
+	if softEnabled() then
+		addSoft(record)
+	end
 	return record
 end
 
@@ -725,6 +749,11 @@ function Crowd.Park(model, position, facing)
 	if not record then
 		return
 	end
+	if record.soft then
+		local fx, fz = flatUnit(facing)
+		solver:place(record.soft, position.X, position.Y, position.Z, fx, fz)
+		record.softX, record.softY, record.softZ = position.X, position.Y, position.Z
+	end
 
 	record.x, record.y, record.z = position.X, position.Y, position.Z
 	place(record)
@@ -742,6 +771,7 @@ end
 -- Забывает всех разом — для рестарта забега (WaveRunner.clearArena сносит врагов пачкой,
 -- и снимать их по одному значило бы полагаться на то, что ни один не потерян).
 function Crowd.Clear()
+	solver:clear()
 	table.clear(records)
 	table.clear(byModel)
 	table.clear(buckets)
@@ -794,6 +824,247 @@ end
 -- или постройки жуков (EnemyStructures), что выше.
 local function groundAt(x, z)
 	return ConcreteFloor.HeightAt(x, z) + math.max(TowerDebris.HeightAt(x, z), EnemyStructures.HeightAt(x, z))
+end
+
+-- ============ Толпа на точках (Workspace.SoftCrowd) ============
+--
+-- Мягкий жук — тело решателя (CrowdSolver): хребет из шаров с положением и скоростью. Запись
+-- толкучки у него та же, и x/y/z/fx/fz в ней держатся по решателю: старые жуки, FindFree,
+-- Fits и турели видят его как обычного. Маршрут (EnemySpawner) не меняется: он по-прежнему
+-- отдаёт желаемую точку, а Resolve превращает её в желаемую скорость и возвращает решённый
+-- пивот. Решатель шагает один раз на всех — в первом Resolve кадра, по желаниям прошлого
+-- кадра (отставание в кадр). Серверных лап у мягкого жука нет: высоту дают тяжесть, пол
+-- и спины соседей.
+
+-- Стены, постройки и стол — те же проверки, что у старой толкучки, по центру тела.
+-- me.x/me.z — где центр был подшагом раньше; home — куда вёл маршрут (см. Resolve выше).
+local function softBound(me, x, z, fx, fz, h)
+	local homeX, homeZ = clampXZ(me.softHomeX or x, me.softHomeZ or z)
+	local bare = me.softBare
+	local caged = insideBuilding(homeX, homeZ)
+	x, z = clampXZ(x, z)
+	if not offFloor(me.x, me.z) and not offFloor(x, z) then
+		x, z = insideWalls(me, x, z, fx, fz)
+	end
+	if not caged and occupied(x, homeZ, me, bare) then
+		x = homeX
+	end
+	if not caged and occupied(x, z, me, bare) then
+		z = homeZ
+	end
+	if not insideBuilding(me.x, me.z) then
+		if occupied(x, me.z, me, true) then
+			x = me.x
+		end
+		if occupied(x, z, me, true) then
+			z = me.z
+		end
+		x, z = outOfBuildings(me, x, z, fx, fz, h)
+	end
+	x, z = outOfTable(me, x, z, fx, fz)
+	me.x, me.z = x, z
+	return x, z
+end
+
+solver = CrowdSolver.new(SOFT, {
+	ground = groundAt,
+	turnStep = EnemyGait.TurnStep,
+	bound = softBound,
+})
+
+function softEnabled()
+	local flag = workspace:GetAttribute("SoftCrowd")
+	if flag == nil then
+		return SOFT.enabled == true
+	end
+	return flag == true
+end
+
+function addSoft(record)
+	record.soft = solver:add(record, record.x, record.y, record.z, record.fx, record.fz,
+		record.radius, record.front, record.back, record.top, record.lift, SOFT.mass)
+	record.softX, record.softY, record.softZ = record.x, record.y, record.z
+end
+
+-- Отладка (Workspace.SoftCrowdDebug): шары на месте точек и строка в Output раз в
+-- SOFT.debugEvery секунд — время старой и новой толпы рядом, чтобы сравнение было честным.
+local stats = {
+	frames = 0, softTime = 0, softWorst = 0, rigidTime = 0, rigidWorst = 0,
+	substeps = 0, contacts = 0, inside = 0, lastPrint = os.clock(),
+}
+local frameAt = nil -- time() кадра, в котором решатель уже шагнул
+local rigidFrame = 0 -- сколько старая толкучка потратила в текущем кадре
+local debugFolder = nil
+local debugParts = {}
+
+local function debugOn()
+	return workspace:GetAttribute("SoftCrowdDebug") == true
+end
+
+-- Точка внутри постройки (по настоящему следу) или стола: так быть не должно.
+local function pointInside(me, x, z)
+	if occupied(x, z, me, true) then
+		return true
+	end
+	local half = Arena.tableHalf
+	if half and (half.X > 0 or half.Z > 0) then
+		return math.abs(x - Arena.table.X) < half.X and math.abs(z - Arena.table.Z) < half.Z
+	end
+	return false
+end
+
+local function drawDebug(dt)
+	if not debugFolder or not debugFolder.Parent then
+		debugFolder = Instance.new("Folder")
+		debugFolder.Name = "SoftCrowdDebug"
+		debugFolder.Parent = workspace
+		table.clear(debugParts)
+	end
+	local parts, frames = {}, {}
+	local used = 0
+	for b = 1, solver.count do
+		local me = solver.user[b]
+		local n, point = solver:points(b)
+		local inside = false
+		for k = 1, n do
+			local x, y, z, radius, center, half = point(k)
+			used += 1
+			local part = debugParts[used]
+			if not part then
+				part = Instance.new("Part")
+				part.Anchored = true
+				part.CanCollide = false
+				part.CanQuery = false
+				part.CanTouch = false
+				part.CastShadow = false
+				part.Material = Enum.Material.Neon
+				part.Transparency = 0.6
+				local mesh = Instance.new("SpecialMesh")
+				mesh.MeshType = Enum.MeshType.Sphere
+				mesh.Parent = part
+				part.Parent = debugFolder
+				debugParts[used] = part
+			end
+			local size = Vector3.new(radius * 2, half * 2, radius * 2)
+			if part.Size ~= size then
+				part.Size = size
+			end
+			local bad = pointInside(me, x, z)
+			inside = inside or bad
+			part.Color = bad and Color3.new(1, 0.2, 0.2) or Color3.new(0.3, 1, 0.5)
+			table.insert(parts, part)
+			table.insert(frames, CFrame.new(x, y + center, z))
+		end
+		-- Точка в твёрдом дольше SOFT.insideAlarm — в счётчик (один раз на случай).
+		if inside then
+			local before = me.softInside or 0
+			me.softInside = before + dt
+			if before < SOFT.insideAlarm and me.softInside >= SOFT.insideAlarm then
+				stats.inside += 1
+			end
+		else
+			me.softInside = nil
+		end
+	end
+	for i = used + 1, #debugParts do
+		table.insert(parts, debugParts[i])
+		table.insert(frames, CFrame.new(0, -1000, 0))
+	end
+	workspace:BulkMoveTo(parts, frames, Enum.BulkMoveMode.FireCFrameChanged)
+end
+
+local function printStats()
+	local frames = math.max(stats.frames, 1)
+	local softBodies, softPoints = solver.count, 0
+	for b = 1, solver.count do
+		softPoints += solver.n[b]
+	end
+	print(("[Толпа] точки: тел %d (точек %d), подшагов/кадр %.1f, контактов/подшаг %.0f, кадр %.2f мс (худший %.2f)"
+		.. " · старая: тел %d, кадр %.2f мс (худший %.2f) · в твёрдом дольше %.0f с: %d"):format(
+		softBodies, softPoints, stats.substeps / frames, stats.contacts / math.max(stats.substeps, 1),
+		stats.softTime / frames * 1000, stats.softWorst * 1000,
+		#records - softBodies, stats.rigidTime / frames * 1000, stats.rigidWorst * 1000,
+		SOFT.insideAlarm, stats.inside))
+	stats.frames, stats.softTime, stats.softWorst, stats.rigidTime, stats.rigidWorst = 0, 0, 0, 0, 0
+	stats.substeps, stats.contacts = 0, 0
+end
+
+-- Начало нового кадра: подвести итог старой толкучки за прошлый кадр, шагнуть решателем.
+local function frameTick(dt)
+	local now = time()
+	if now == frameAt then
+		return
+	end
+	local frameDt = if frameAt then now - frameAt else dt
+	frameAt = now
+
+	stats.frames += 1
+	stats.rigidTime += rigidFrame
+	stats.rigidWorst = math.max(stats.rigidWorst, rigidFrame)
+	rigidFrame = 0
+
+	if solver.count > 0 then
+		debug.profilebegin("CrowdSolver")
+		local started = os.clock()
+		solver.contacts = 0
+		local subs = solver:step(frameDt)
+		for b = 1, solver.count do
+			local record = solver.user[b]
+			local x, y, z, fx, fz = solver:pivot(b)
+			record.x, record.y, record.z, record.fx, record.fz = x, y, z, fx, fz
+			record.advance = solver:advance(b)
+			place(record)
+		end
+		local spent = os.clock() - started
+		debug.profileend()
+		stats.softTime += spent
+		stats.softWorst = math.max(stats.softWorst, spent)
+		stats.substeps += subs
+		stats.contacts += solver.contacts
+	end
+
+	if debugOn() then
+		drawDebug(frameDt)
+		if os.clock() - stats.lastPrint >= SOFT.debugEvery then
+			stats.lastPrint = os.clock()
+			printStats()
+		end
+	elseif debugFolder then
+		debugFolder:Destroy()
+		debugFolder = nil
+		table.clear(debugParts)
+	end
+end
+
+function noteRigid(spent)
+	frameTick(0)
+	rigidFrame += spent
+end
+
+-- Resolve мягкого жука: желаемая точка — в желаемую скорость, назад — решённый пивот.
+function resolveSoft(me, desired, dt, facing, bare)
+	frameTick(dt)
+	local b = me.soft
+	if not b then
+		return desired, facing
+	end
+	local fx, fz = flatUnit(facing)
+	local dx, dz = desired.X - me.softX, desired.Z - me.softZ
+	-- Желаемая точка далеко от тела — жука переставили (перенос, поиск места): тело туда же.
+	local snap = SOFT.snapDistance
+	if dx * dx + dz * dz > snap * snap then
+		local y = groundAt(desired.X, desired.Z) + me.lift
+		solver:place(b, desired.X, y, desired.Z, fx, fz)
+		me.x, me.y, me.z = desired.X, y, desired.Z
+		dx, dz = 0, 0
+	end
+	local inv = if dt > 1e-4 then 1 / dt else 0
+	solver:drive(b, dx * inv, dz * inv, fx, fz)
+	me.softHomeX, me.softHomeZ, me.softBare = desired.X, desired.Z, bare
+
+	local x, y, z, ax, az = solver:pivot(b)
+	me.softX, me.softY, me.softZ = x, y, z
+	return Vector3.new(x, y, z), Vector3.new(ax, 0, az)
 end
 
 -- Куда встанет лапа в точке (x, z) у тела на высоте bodyY: высота и сосед, на котором
@@ -950,6 +1221,17 @@ function Crowd.Resolve(model, desired, dt, facing, bare)
 	if not me then
 		return desired, facing
 	end
+	if me.soft then
+		return resolveSoft(me, desired, dt, facing, bare)
+	end
+	local started = os.clock()
+	local position, turned = resolveRigid(me, desired, dt, facing, bare)
+	noteRigid(os.clock() - started)
+	return position, turned
+end
+
+-- Старая толкучка: одна капсула на жука, правила вместо физики (см. шапку).
+function resolveRigid(me, desired, dt, facing, bare)
 
 	local fx, fz = flatUnit(facing)
 	if not fx then
