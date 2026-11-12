@@ -79,6 +79,48 @@ end
 -- только если носильщикам есть что увезти (Economy.integrity: лепёшка, клочья, лужица).
 local BODYLESS = { crush = true, melt = true, dissolve = true, gib = true, destroy = true }
 
+-- Остаётся ли от жука тело (туша), которое может лежать и которое толкают.
+function Corpses.HasBody(remains)
+	return remains ~= "transform" and not BODYLESS[remains or "body"]
+end
+
+-- Куда отбросило раздавленного (толпа на точках, шаг 4): то же правило, что рисует клиент
+-- (CorpseRemains.throwOf), но считает сервер — запись трупа встаёт туда, где лепёшка, и
+-- носильщик убирает её, а не пустое место смерти. Возвращает смещение по горизонтали
+-- без учёта стены (его получит клиент) и точку лепёшки с учётом стены (для записи).
+local crushPlan = PhysicsFX.remains.crush
+local function throwOf(hit, center, scale, width)
+	if not (hit.from and hit.throw) then
+		return nil
+	end
+	local direction = center - hit.from
+	direction = Vector3.new(direction.X, 0, direction.Z)
+	if direction.Magnitude < 1e-3 then
+		return nil
+	end
+	direction = direction.Unit
+	local distance = (crushPlan.throwBase + hit.throw * crushPlan.throwPerStud) * scale
+	local include = {}
+	local location = Workspace:FindFirstChild("Location")
+	local walls = location and location:FindFirstChild("Walls")
+	if walls then
+		table.insert(include, walls)
+	end
+	local landing = center + direction * distance
+	if #include > 0 then
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Include
+		params.FilterDescendantsInstances = include
+		params.IgnoreWater = true
+		local reach = width / 2
+		local result = Workspace:Raycast(center, direction * (distance + reach), params)
+		if result and math.abs(result.Normal.Y) < crushPlan.wallSlope then
+			landing = center + direction * math.max(result.Distance - reach, 0)
+		end
+	end
+	return direction * distance, landing
+end
+
 -- Сколько носильщиков нужно на тушу (Economy.crewArea): по площади тела, лёгким останкам — один.
 local function crewFor(remains, scale)
 	if Economy.lightRemains[remains] then
@@ -99,6 +141,17 @@ function Corpses.Leave(enemy, hit)
 	end
 	hit = table.clone(hit or {})
 	hit.remains = hit.remains or "body"
+	-- Жук из толпы на точках (шаг 4): место раздавленного считает сервер.
+	local soft = hit.soft == true
+	hit.soft = nil
+	local landing = nil
+	if soft and hit.remains == "crush" then
+		local _, size = enemy:GetBoundingBox()
+		local travel
+		travel, landing = throwOf(hit, enemy:GetPivot().Position, (enemy:GetAttribute("Scale") or 3) / 3,
+			math.max(size.X, size.Z))
+		hit.travel = travel
+	end
 	-- Обугленный труп — только вид «char» (горел или добит огнём, по вики). Потушенный
 	-- Мокрым или оплавленный без огня жук оставляет обычное тело.
 	hit.scorched = hit.remains == "char"
@@ -118,7 +171,7 @@ function Corpses.Leave(enemy, hit)
 	local scale = hit.scale / 3
 	local record = {
 		id = nextId,
-		position = root.Position,
+		position = landing or root.Position,
 		alive = true,
 		remains = hit.remains,
 		scale = scale,
@@ -138,6 +191,16 @@ function Corpses.Leave(enemy, hit)
 		task.delay(CRUMBLE_TIME, crumble, record)
 	end
 	return record
+end
+
+-- Труп на сервере лёг (толпа на точках, шаг 4): запись встаёт туда, клиенты дотягивают
+-- тушу до этой точки. Одно событие на труп.
+function Corpses.Rest(record, position)
+	if not (record and record.alive) then
+		return
+	end
+	record.position = position
+	EnemyFX:FireAllClients("rest", record.id, position)
 end
 
 -- Касание хрупких трупов (холодная ветка, по вики): что тронуло круг center/radius —

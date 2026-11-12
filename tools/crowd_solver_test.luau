@@ -636,6 +636,68 @@ do
 	check(z > 9, ("прошёл под постройкой до z=%.1f"):format(z))
 end
 
+print("15. Труп: убитый в полёте летит дальше, ложится, точка покоя как у живого (шаг 4)")
+do
+	local function fly(kill)
+		local solver = newSolver()
+		local user = spawn(solver, 0, -30)
+		solver:drive(user.b, 0, 0)
+		solver:step(DT)
+		local x0, _, z0 = solver:pivot(user.b)
+		solver:shove(user.b, 0, 6)
+		local restedAt, speedAtKill = nil, 0
+		for frame = 1, 300 do
+			if frame == 6 and kill then
+				local vx, vy, vz = solver:velocity(user.b)
+				speedAtKill = math.sqrt(vx * vx + vy * vy + vz * vz)
+				solver:kill(user.b)
+			end
+			if not (kill and frame >= 6) then
+				solver:drive(user.b, 0, 0)
+			end
+			solver:step(DT)
+			if kill and not restedAt and solver:resting(user.b) then
+				restedAt = frame * DT
+			end
+		end
+		local x1, y1, z1 = solver:pivot(user.b)
+		return math.sqrt((x1 - x0) ^ 2 + (z1 - z0) ^ 2), y1, restedAt, speedAtKill
+	end
+	local alive = fly(false)
+	local dead, y, restedAt, speed = fly(true)
+	check(speed > 5, ("в момент смерти тело летит со скоростью %.1f studs/с"):format(speed))
+	check(math.abs(dead - alive) <= 0.15 * alive and math.abs(y - LIFT) < 0.05,
+		("труп проехал %.2f, живой %.2f, лежит на полу"):format(dead, alive))
+	check(restedAt ~= nil and restedAt < 2.5, ("лёг через %.2f с"):format(restedAt or -1))
+end
+
+print("16. Труп — помеха живым: его отталкивают, живой проходит")
+do
+	local solver = newSolver()
+	local corpse = spawn(solver, 0, 10)
+	solver:drive(corpse.b, 0, 0)
+	solver:step(DT)
+	solver:kill(corpse.b)
+	local walker = spawn(solver, 0.3, 2)
+	local deepest = 0
+	for _ = 1, 360 do
+		local x, _, z = solver:pivot(walker.b)
+		local dx, dz = 0 - x, 20 - z
+		local len = math.max(math.sqrt(dx * dx + dz * dz), 1e-3)
+		solver:drive(walker.b, dx / len * 6, dz / len * 6, dx / len, dz / len)
+		solver:step(DT)
+		local _, d = audit(solver)
+		deepest = math.max(deepest, d)
+	end
+	local cx, cy, cz = solver:pivot(corpse.b)
+	local _, _, wz = solver:pivot(walker.b)
+	local shifted = math.sqrt(cx * cx + (cz - 10) ^ 2)
+	check(wz > 18, ("живой прошёл до z=%.1f"):format(wz))
+	check(shifted > 0.3 and math.abs(cy - LIFT) < 0.6, ("труп сдвинули на %.2f, пивот %.2f"):format(shifted, cy))
+	check(deepest < 0.35, ("глубже всего вошли друг в друга на %.0f%%"):format(deepest * 100))
+	check(solver:resting(corpse.b), "после этого труп лежит")
+end
+
 print(failures == 0 and "Всё прошло." or ("Провалов: %d"):format(failures))
 if failures > 0 then
 	error("crowd solver test failed")

@@ -24,6 +24,7 @@
 -- Лапу не ставят на того, чьи лапы стоят на нас: пара «я на тебе, ты на мне» невозможна.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
+local RunService = game:GetService("RunService")
 
 local Arena = require(ReplicatedStorage:WaitForChild("Arena"))
 local Grid = require(ServerScriptService:WaitForChild("Grid"))
@@ -1080,9 +1081,11 @@ local function drawDebug(dt)
 			if part.Size ~= size then
 				part.Size = size
 			end
-			local bad = pointInside(me, x, z, y)
+			local bad = not me.corpse and pointInside(me, x, z, y)
 			inside = inside or bad
-			part.Color = bad and Color3.new(1, 0.2, 0.2) or Color3.new(0.3, 1, 0.5)
+			part.Color = if bad then Color3.new(1, 0.2, 0.2)
+				elseif me.corpse then Color3.new(0.55, 0.55, 0.55)
+				else Color3.new(0.3, 1, 0.5)
 			table.insert(parts, part)
 			table.insert(frames, CFrame.new(x, y + center, z))
 		end
@@ -1106,15 +1109,18 @@ end
 
 local function printStats()
 	local frames = math.max(stats.frames, 1)
-	local softBodies, softPoints = solver.count, 0
+	local softBodies, softPoints, softDead = solver.count, 0, 0
 	for b = 1, solver.count do
 		softPoints += solver.n[b]
+		if solver.user[b].corpse then
+			softDead += 1
+		end
 	end
-	print(("[Толпа] точки: тел %d (точек %d), подшагов/кадр %.1f, контактов/подшаг %.0f, кадр %.2f мс (худший %.2f)"
+	print(("[Толпа] точки: тел %d (трупов %d, точек %d), подшагов/кадр %.1f, контактов/подшаг %.0f, кадр %.2f мс (худший %.2f)"
 		.. " · старая: тел %d, кадр %.2f мс (худший %.2f) · в твёрдом дольше %.0f с: %d"):format(
-		softBodies, softPoints, stats.substeps / frames, stats.contacts / math.max(stats.substeps, 1),
+		softBodies, softDead, softPoints, stats.substeps / frames, stats.contacts / math.max(stats.substeps, 1),
 		stats.softTime / frames * 1000, stats.softWorst * 1000,
-		#records - softBodies, stats.rigidTime / frames * 1000, stats.rigidWorst * 1000,
+		#records - (softBodies - softDead), stats.rigidTime / frames * 1000, stats.rigidWorst * 1000,
 		SOFT.insideAlarm, stats.inside))
 	stats.frames, stats.softTime, stats.softWorst, stats.rigidTime, stats.rigidWorst = 0, 0, 0, 0, 0
 	stats.substeps, stats.contacts = 0, 0
@@ -1149,7 +1155,7 @@ local function frameTick(dt)
 		-- снимается, когда тело уже на полу — со стены и с крыши не сдёргивается.
 		for b = 1, solver.count do
 			local record = solver.user[b]
-			if record.softClimbAt and now - record.softClimbAt > SOFT.climbForget
+			if not record.corpse and record.softClimbAt and now - record.softClimbAt > SOFT.climbForget
 				and solver:perchOf(b) == CrowdSolver.GROUND then
 				record.softClimbAt = nil
 				solver:allowClimb(b, 0, 0)
@@ -1159,10 +1165,25 @@ local function frameTick(dt)
 		local subs = solver:step(frameDt)
 		for b = 1, solver.count do
 			local record = solver.user[b]
-			local x, y, z, fx, fz = solver:pivot(b)
-			record.x, record.y, record.z, record.fx, record.fz = x, y, z, fx, fz
-			record.advance = solver:advance(b)
-			place(record)
+			if not record.corpse then
+				local x, y, z, fx, fz = solver:pivot(b)
+				record.x, record.y, record.z, record.fx, record.fz = x, y, z, fx, fz
+				record.advance = solver:advance(b)
+				place(record)
+			end
+		end
+		-- Трупы (шаг 4): лёг или пролежал в толпе предельное время — точка покоя уходит
+		-- владельцу (запись Corpses), тело из решателя снимается. С конца: снятие ставит
+		-- на место снятого последнее тело, а оно уже пройдено.
+		for b = solver.count, 1, -1 do
+			local corpse = solver.user[b]
+			if corpse.corpse and (solver:resting(b) or now - corpse.diedAt > SOFT.corpseMaxTime) then
+				local x, y, z = solver:pivot(b)
+				forgetSoft(corpse)
+				if corpse.onRest then
+					task.spawn(corpse.onRest, Vector3.new(x, y, z))
+				end
+			end
 		end
 		local spent = os.clock() - started
 		debug.profileend()
@@ -1189,6 +1210,14 @@ function noteRigid(spent)
 	frameTick(0)
 	rigidFrame += spent
 end
+
+-- Трупы лежат в решателе и тогда, когда живых, которые его шагают (Resolve), уже нет:
+-- кадр начинается и отсюда. Шаг всё равно один на кадр (frameTick смотрит на time()).
+RunService.Heartbeat:Connect(function(dt)
+	if solver.count > 0 then
+		frameTick(dt)
+	end
+end)
 
 -- Resolve мягкого жука: желаемая точка — в желаемую скорость, назад — решённый пивот,
 -- ход и наклон тела (голова с тангажом и верх с креном — для кадра жука).
@@ -1228,6 +1257,42 @@ function resolveSoft(me, desired, dt, facing, bare, ram)
 	me.softX, me.softY, me.softZ = x, y, z
 	local lx, ly, lz, ux, uy, uz = solver:tilt(b)
 	return Vector3.new(x, y, z), Vector3.new(ax, 0, az), Vector3.new(lx, ly, lz), Vector3.new(ux, uy, uz)
+end
+
+-- Мягкий жук умер (шаг 4). Возвращает, как летело тело: { velocity, spin } — с этим клиент
+-- запускает тушу, или nil, если жук не в толпе на точках. keep — у жука остаётся тело:
+-- тогда оно лежит в толпе трупом (живым помеха, его толкают), пока не остановится, и точка,
+-- где оно легло, уходит в fall.rest(position) — его ставит вызывающий после Corpses.Leave.
+-- push — добивающий толчок (studs/сек, Vector3): тело получает его до того, как стать трупом.
+-- Без keep тела нет (давит, плавит, рвёт...) — из решателя оно уходит сразу.
+function Crowd.Die(model, keep, push)
+	local record = byModel[model]
+	if not (record and record.soft) then
+		return nil
+	end
+	local b = record.soft
+	-- Недобранный толчок: элемент мог положить отброс в Push тем же ударом, что убил.
+	local pending = model:GetAttribute("Push")
+	if typeof(pending) == "Vector3" then
+		model:SetAttribute("Push", nil)
+		solver:shove(b, pending.X, pending.Z)
+	end
+	if push then
+		solver:knock(b, push.X, push.Y, push.Z, 0)
+	end
+	local vx, vy, vz, spin = solver:velocity(b)
+	local fall = { velocity = Vector3.new(vx, vy, vz), spin = spin }
+	if keep then
+		local corpse = { corpse = true, soft = b, diedAt = time(), lift = record.lift, bodyHeight = record.bodyHeight }
+		record.soft = nil
+		solver.user[b] = corpse
+		solver:kill(b)
+		function fall.rest(callback)
+			corpse.onRest = callback
+		end
+	end
+	Crowd.Remove(model)
+	return fall
 end
 
 -- Ведёт ли жука толпа на точках.

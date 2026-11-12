@@ -1,5 +1,5 @@
 --!native
--- Решатель толпы на точках (план «Точечная физика жуков», шаг 1).
+-- Решатель толпы на точках (план «Точечная физика жуков», шаги 1–4).
 --
 -- Жук здесь — хребет из 1–3 шаров вдоль его капсулы (голова, середина, брюшко). У каждой
 -- точки есть положение, скорость и обратная масса. Шаг один на всех: точки летят по инерции
@@ -18,6 +18,9 @@
 -- Каждая точка выталкивается из них сама, по своему радиусу.
 -- Поэтому его можно гонять в Lune на сцене из чисел (tools/crowd_solver_test.luau).
 --
+-- Убитый жук остаётся телом-трупом (kill, шаг 4): привода нет, его несёт то, что было, его
+-- толкают живые, и он лежит, пока не остановится (resting) — тогда владелец снимает его.
+--
 -- Все данные — плоские массивы чисел по номеру тела и номеру точки. Точки тела b лежат
 -- подряд с номера (b - 1) * 3 + 1, их n[b] штук. Числа — PhysicsFX.crowd, своих здесь нет.
 local CrowdSolver = {}
@@ -32,6 +35,7 @@ local BODY_KEYS = {
 	"pressing", "pressX", "pressZ", "dodge", "progress",
 	"air", "roll", "rollVel", "flip", "heavy",
 	"climbV", "climbTop", "bodyH", "perch", "pitchMax",
+	"dead", "still",
 }
 local POINT_KEYS = {
 	"px", "py", "pz", "ox", "oy", "oz", "vx", "vy", "vz", "off", "r", "hc", "hs", "lift", "w", "gr", "gb", "climb",
@@ -125,6 +129,8 @@ function CrowdSolver:add(user, x, y, z, fx, fz, radius, front, back, shellTop, l
 	self.perch[b] = 0
 	self.pitchMax[b] = cfg.maxPitch
 	self.progress[b] = 0
+	self.dead[b] = false -- труп (шаг 4): без привода, лежит, пока не остановится
+	self.still[b] = 0 -- сколько секунд труп почти не движется
 
 	-- Объём по высоте — от ступней (пивот минус lift) до верха спины: под брюхом крупного
 	-- мелкий не проходит, там его лапы (как в старой толкучке).
@@ -225,6 +231,7 @@ function CrowdSolver:place(b, x, y, z, fx, fz)
 	self.air[b] = false
 	self.roll[b], self.rollVel[b], self.flip[b] = 0, 0, 0
 	self.perch[b] = 0
+	self.still[b] = 0
 end
 
 -- Разрешить телу лезть на постройки (маршрут велит перелезть): скорость подъёма и высота
@@ -353,6 +360,38 @@ end
 -- Летит ли тело от толчка (ещё не приземлилось).
 function CrowdSolver:airborne(b)
 	return self.air[b]
+end
+
+-- Средняя скорость точек тела и скорость крена: с ними клиент запускает тушу (шаг 4).
+function CrowdSolver:velocity(b)
+	local n = self.n[b]
+	local base = (b - 1) * STRIDE
+	local x, y, z = 0, 0, 0
+	for k = 1, n do
+		local i = base + k
+		x += self.vx[i]
+		y += self.vy[i]
+		z += self.vz[i]
+	end
+	return x / n, y / n, z / n, self.rollVel[b]
+end
+
+-- Жук умер: тело остаётся в толпе трупом. Привода нет, лезть нельзя, с ведомого снимается
+-- неподвижность: дальше его несёт то, что у него было, тяжесть, опора и соседи.
+function CrowdSolver:kill(b)
+	self.dead[b] = true
+	self.still[b] = 0
+	self.driveX[b], self.driveZ[b] = 0, 0
+	self.wantFx[b], self.wantFz[b] = self.fx[b], self.fz[b]
+	self.climbV[b], self.climbTop[b] = 0, 0
+	self.heavy[b] = 1
+	self.stuck[b], self.shake[b], self.dodge[b] = 0, 0, 0
+	self.kin[b] = false
+end
+
+-- Труп лёг: на опоре и почти не движется уже cfg.restTime секунд.
+function CrowdSolver:resting(b)
+	return self.dead[b] and self.still[b] >= self.cfg.restTime
 end
 
 -- Толчок: прибавка скорости всем точкам тела. Вверх — отрыв от опоры, дальше тяжесть.
@@ -492,6 +531,7 @@ function CrowdSolver:substep(h)
 	local supported, pressing, pressX, pressZ, progress = self.supported, self.pressing, self.pressX, self.pressZ, self.progress
 	local dodge = self.dodge
 	local air, rolls, rollVel, flip, heavy = self.air, self.roll, self.rollVel, self.flip, self.heavy
+	local dead, still = self.dead, self.still
 	local climbV, climbTop, bodyH, perch, pitchMax = self.climbV, self.climbTop, self.bodyH, self.perch, self.pitchMax
 	local gb = self.gb
 	local boxCount, boxCells = self.boxCount, self.boxCells
@@ -529,6 +569,9 @@ function CrowdSolver:substep(h)
 				end
 			end
 			local wx, wz = wantFx[b], wantFz[b]
+			if dead[b] then
+				wx, wz = ax, az -- труп не доворачивается
+			end
 			local angle = math.atan2(ax * wz - az * wx, ax * wx + az * wz)
 			local turn = turnStep(angle, h)
 			if math.abs(angle) > turn then
@@ -581,7 +624,7 @@ function CrowdSolver:substep(h)
 				rollVel[b] = 0
 				if math.abs(roll) > math.pi / 2 then
 					flip[b] += h
-					if flip[b] >= cfg.flipTime then
+					if flip[b] >= cfg.flipTime and not dead[b] then
 						roll -= math.sign(roll) * cfg.standSpeed * h
 					end
 					dvx, dvz = 0, 0
@@ -1017,6 +1060,7 @@ function CrowdSolver:substep(h)
 			local dvx, dvz = driveX[b], driveZ[b]
 			local want = math.sqrt(dvx * dvx + dvz * dvz)
 			local along = 0
+			local fastest = 0
 			for k = 1, nb do
 				local i = base + k
 				local x, y, z = (px[i] - ox[i]) / h, (py[i] - oy[i]) / h, (pz[i] - oz[i]) / h
@@ -1049,15 +1093,25 @@ function CrowdSolver:substep(h)
 				if want > 1e-3 then
 					along += (x * dvx + z * dvz) / want
 				end
+				fastest = math.max(fastest, x * x + y * y + z * z)
 			end
 			progress[b] = math.max(0, along / nb)
+			if dead[b] then
+				local rest = cfg.restSpeed
+				if supported[b] and not air[b] and fastest < rest * rest then
+					still[b] += h
+				else
+					still[b] = 0
+				end
+			end
 		end
 	end
 end
 
 -- Шаг на время кадра dt: кадр делится на равные подшаги не длиннее cfg.step, их не больше
 -- cfg.maxSubsteps. Долг времени не копится: на просевшем сервере жуки идут медленнее,
--- а не рывками догоняют. Тело, которому с прошлого шага не дали привода, ведомое.
+-- а не рывками догоняют. Тело, которому с прошлого шага не дали привода, ведомое
+-- (кроме трупа: он движется сам).
 -- Возвращает число подшагов.
 function CrowdSolver:step(dt)
 	local cfg = self.cfg
@@ -1066,8 +1120,9 @@ function CrowdSolver:step(dt)
 		return 0
 	end
 	local kin, fresh = self.kin, self.fresh
+	local dead = self.dead
 	for b = 1, self.count do
-		if not fresh[b] then
+		if not fresh[b] and not dead[b] then
 			kin[b] = true
 		end
 		fresh[b] = false

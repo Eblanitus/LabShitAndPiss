@@ -571,7 +571,11 @@ function Corpses.Leave(enemy, hit, id)
 	-- Резкая смерть — только от сильного удара (PhysicsFX.death); остальные оседают мягко,
 	-- и для этого нужна живая поза до выцветания и позы смерти.
 	local fraction = hit and hit.fraction or 0
+	-- Толпа на точках (шаг 4): сервер прислал, как летело тело в момент смерти (с добивающим
+	-- ударом). Быстрая туша летит дальше физикой — продолжение полёта, без оседания на месте.
+	local velocity = hit and typeof(hit.velocity) == "Vector3" and hit.velocity or nil
 	local hard = fraction >= PhysicsFX.death.hardFraction or (hit and hit.carry ~= nil)
+		or (velocity ~= nil and velocity.Magnitude > PhysicsFX.crowd.corpseHard)
 	-- Летающий (атрибут серверной модели) падает с высоты — его роняет физика, как раньше.
 	local flying = enemy.Parent and enemy.Parent:GetAttribute("Flying")
 	local livePose = not hard and not flying and snapshot(corpse, root) or nil
@@ -669,11 +673,14 @@ function Corpses.Leave(enemy, hit, id)
 		end
 
 		-- Добивающий удар толкает и саму тушу — тем сильнее, чем больше доля урона.
-		if from and fraction > 0 then
+		-- У жука из толпы на точках удар уже в скорости тела (сервер), его туша берёт целиком.
+		if velocity then
+			root.AssemblyLinearVelocity += velocity
+		elseif from and fraction > 0 then
 			local away = bodyCenter - from
 			away = Vector3.new(away.X, 0, away.Z)
 			if away.Magnitude > 1e-3 then
-				root.AssemblyLinearVelocity += (away.Unit + Vector3.yAxis * 0.3).Unit
+				root.AssemblyLinearVelocity += (away.Unit + Vector3.yAxis * PhysicsFX.hit.lift).Unit
 					* PhysicsFX.hit.speed * math.min(fraction, 1.5)
 			end
 		end
@@ -739,6 +746,69 @@ function Corpses.Leave(enemy, hit, id)
 		byId[id] = corpse
 	end
 	return corpse
+end
+
+-- Толпа на точках (шаг 4): сервер сообщил, где труп лёг у него. Туша дожидается, пока сама
+-- уляжется, и плавно доезжает туда: носильщик и Пеликан идут к серверной точке, и видимый
+-- труп обязан лежать там же. Числа — PhysicsFX.crowd (restCalm, restPull, restTolerance).
+local function pullToRest(corpse, target)
+	local plan = PhysicsFX.crowd
+	local calm, waited = 0, 0
+	while corpse.Parent do
+		local root = corpse.PrimaryPart
+		if not root then
+			return
+		end
+		if not root.Anchored and root.AssemblyLinearVelocity.Magnitude < plan.restCalm then
+			if calm >= plan.restTime then
+				break
+			end
+		else
+			calm = 0
+		end
+		-- Туша так и не улеглась (её толкают живые) — доводится всё равно.
+		if waited >= plan.corpseMaxTime then
+			break
+		end
+		local dt = RunService.Heartbeat:Wait()
+		calm += dt
+		waited += dt
+	end
+	local root = corpse.PrimaryPart
+	if not (corpse.Parent and root) or root.Anchored then
+		return
+	end
+	local here = root.Position
+	local shift = Vector3.new(target.X - here.X, 0, target.Z - here.Z)
+	if shift.Magnitude <= plan.restTolerance * (scaleOf[corpse] or 1) then
+		return
+	end
+	-- Пол там может быть выше или ниже (яма, обломок): туша едет вместе с ним.
+	local rise = Loose.FloorAt(target.X, target.Z) - Loose.FloorAt(here.X, here.Z)
+	if rise == rise then
+		shift += Vector3.yAxis * rise
+	end
+	-- Без якоря: другой эффект (осыпание, растворение) может сам взять тушу на якорь,
+	-- и снимать его здесь нельзя. Кадр за кадром — ставится и гасится скорость.
+	local start = corpse:GetPivot()
+	local began = os.clock()
+	while corpse.Parent and root.Parent and not root.Anchored do
+		local t = math.min((os.clock() - began) / plan.restPull, 1)
+		corpse:PivotTo(start + shift * (t * t * (3 - 2 * t)))
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		if t >= 1 then
+			break
+		end
+		RunService.Heartbeat:Wait()
+	end
+end
+
+function Corpses.Rest(id, position)
+	local corpse = byId[id]
+	if corpse and corpse.Parent and typeof(position) == "Vector3" then
+		task.spawn(pullToRest, corpse, position)
+	end
 end
 
 -- Хрупкий труп тронули (решает сервер): лопается на ледяные осколки, они тают.

@@ -1754,16 +1754,43 @@ local function spawnEnemy(enemyType, offset, hpOverride, startPosition, setup)
 				-- HitFrom (ставит Projectile) — куда.
 				local maxHp = math.max(enemy:GetAttribute("MaxHP") or hp, 1)
 				local from = enemy:GetAttribute("HitFrom")
-				Corpses.Leave(enemy, {
-					fraction = math.max(previousHp - currentHp, 0) / maxHp,
-					from = typeof(from) == "Vector3" and from or nil,
+				from = typeof(from) == "Vector3" and from or nil
+				local fraction = math.max(previousHp - currentHp, 0) / maxHp
+				-- Толпа на точках (шаг 4): тело с тушей остаётся в толпе трупом и летит дальше
+				-- тем, что у него было, плюс добивающий удар. Скорость уходит клиенту — туша
+				-- стартует с неё, точка, где тело легло, — в запись трупа (Corpses.Rest).
+				local fall = nil
+				if Crowd.IsSoft(enemy) then
+					local bodied = Corpses.HasBody(remains)
+					local push = nil
+					if bodied and from and fraction > 0 then
+						local away = Vector3.new(deathPoint.X - from.X, 0, deathPoint.Z - from.Z)
+						if away.Magnitude > 1e-3 then
+							push = (away.Unit + Vector3.yAxis * PhysicsFX.hit.lift).Unit
+								* PhysicsFX.hit.speed * math.min(fraction, 1.5)
+						end
+					end
+					fall = Crowd.Die(enemy, bodied, push)
+				end
+				local record = Corpses.Leave(enemy, {
+					fraction = fraction,
+					from = from,
 					remains = remains,
 					throw = remains == "crush" and Effects.ThrowOf(enemy) or nil,
 					-- Умер Болотным — труп тоже болотный и заражает прошедших по нему (по вики).
 					swampy = enemy:GetAttribute("Infected") == true,
 					-- Материя целого трупа; сколько из неё выйдет, решает вид останков (Economy).
 					value = not enemy:GetAttribute("Ally") and (enemyData.matter or 0) or 0,
+					soft = fall ~= nil,
+					velocity = fall and fall.rest and fall.velocity or nil,
 				})
+				if fall and fall.rest and record then
+					fall.rest(function(position)
+						Corpses.Rest(record, position)
+					end)
+				end
+			elseif Crowd.IsSoft(enemy) then
+				Crowd.Die(enemy, false)
 			end
 
 			enemy:Destroy()

@@ -136,7 +136,12 @@ return function(deps)
 	local function throwOf(hit, center, scale)
 		local p = plan.crush
 		local direction, distance
-		if hit.carry and hit.carry.Magnitude > 1 then
+		if typeof(hit.travel) == "Vector3" then
+			-- Толпа на точках (шаг 4): куда отбросило, посчитал сервер (Corpses.Leave) —
+			-- запись трупа там же, и носильщик убирает именно эту лепёшку.
+			direction = hit.travel
+			distance = hit.travel.Magnitude
+		elseif hit.carry and hit.carry.Magnitude > 1 then
 			direction = hit.carry
 			distance = hit.carry.Magnitude * p.carryTime
 		elseif hit.from and hit.throw then
