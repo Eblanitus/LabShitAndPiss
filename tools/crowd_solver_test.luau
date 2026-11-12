@@ -65,9 +65,10 @@ local function newSolver()
 			return math.clamp(math.abs(angle) * 6, 2, 12) * dt
 		end,
 		-- Как в Crowd: по центру тела, капсула грубо — шаром по радиусу плюс половина длины.
-		bound = function(user, x, z, fx, fz, h)
+		bound = function(user, x, z, fx, fz, h, above)
 			x, z = math.clamp(x, -20, 20), math.clamp(z, -40, 40)
-			for _, rect in WALLS do
+			-- Стена высотой 3: летящий выше неё перелетает (как постройки в Crowd).
+			for _, rect in (above or 0) > 3 and {} or WALLS do
 				-- Каждая точка хребта не в стене: сдвиг всего тела.
 				for _, along in { FRONT, BACK } do
 					local px, pz = x + fx * along, z + fz * along
@@ -278,6 +279,156 @@ for _, total in { 150, 300 } do
 	local _, deepest, nan = audit(solver)
 	check(nan == 0, ("%d тел: нечисловых нет, глубже всего %.0f%%"):format(total, deepest * 100))
 	print(("       шаг: в среднем %.2f мс, худший %.2f мс (Lune, не Roblox)"):format(spent / steps * 1000, worst * 1000))
+end
+
+print("5. Толчок: одиночный жук проезжает те же studs (шаг 2, допуск 10%)")
+for _, distance in { 0.5, 1, 3, 6, 10 } do
+	local solver = newSolver()
+	local user = spawn(solver, 0, -30)
+	solver:drive(user.b, 0, 0)
+	solver:step(DT)
+	local x0, _, z0 = solver:pivot(user.b)
+	solver:shove(user.b, 0, distance)
+	local apex = 0
+	for _ = 1, 240 do
+		solver:drive(user.b, 0, 0)
+		solver:step(DT)
+		local _, y = solver:pivot(user.b)
+		apex = math.max(apex, y - LIFT)
+	end
+	local x1, y1, z1 = solver:pivot(user.b)
+	local moved = math.sqrt((x1 - x0) ^ 2 + (z1 - z0) ^ 2)
+	check(math.abs(moved - distance) / distance <= 0.1 and math.abs(y1 - LIFT) < 0.05 and not solver:airborne(user.b),
+		("толчок %.1f: проехал %.2f, взлетал на %.2f, сел"):format(distance, moved, apex))
+end
+
+print("6. Толчок в толпу: передний отлетает меньше, задних сдвигает")
+do
+	local solver = newSolver()
+	local front = spawn(solver, 0, -20)
+	local row = {}
+	for i = 1, 5 do
+		table.insert(row, spawn(solver, -4 + (i - 1) * 2.7, -20 + 3.2))
+	end
+	local function settle(frames)
+		for _ = 1, frames do
+			solver:drive(front.b, 0, 0)
+			for _, u in row do
+				solver:drive(u.b, 0, 0)
+			end
+			solver:step(DT)
+		end
+	end
+	settle(10)
+	local before = {}
+	for _, u in row do
+		local x, _, z = solver:pivot(u.b)
+		before[u] = Vector3 and nil or { x, z }
+		before[u] = { x, z }
+	end
+	local _, _, fz0 = solver:pivot(front.b)
+	solver:shove(front.b, 0, 6)
+	settle(240)
+	local _, _, fz1 = solver:pivot(front.b)
+	local shifted = 0
+	for _, u in row do
+		local x, _, z = solver:pivot(u.b)
+		shifted += math.sqrt((x - before[u][1]) ^ 2 + (z - before[u][2]) ^ 2)
+	end
+	check(fz1 - fz0 < 6 and shifted > 0.5,
+		("передний проехал %.2f из 6, задние сдвинулись в сумме на %.2f"):format(fz1 - fz0, shifted))
+end
+
+print("7. Подброс: дуга на высоту и посадка в цель")
+do
+	local solver = newSolver()
+	local user = spawn(solver, -10, -30)
+	solver:drive(user.b, 0, 0)
+	solver:step(DT)
+	local height, tx, tz = 10, 8, 10
+	local x0, _, z0 = solver:pivot(user.b)
+	local vx, up, vz = CrowdSolver.tossVelocity(CFG, tx - x0, tz - z0, height)
+	local flight = 2 * up / CFG.gravity
+	solver:knock(user.b, vx, up, vz, 0)
+	local apex, t, landedAt = 0, 0, nil
+	for _ = 1, 600 do
+		solver:drive(user.b, 0, 0)
+		solver:step(DT)
+		t += DT
+		local _, y = solver:pivot(user.b)
+		apex = math.max(apex, y - LIFT)
+		if not landedAt and t > CFG.tossLand and not solver:airborne(user.b) then
+			landedAt = t
+		end
+	end
+	local x1, y1, z1 = solver:pivot(user.b)
+	local miss = math.sqrt((x1 - tx) ^ 2 + (z1 - tz) ^ 2)
+	check(math.abs(apex - height) < 1 and miss < 1.5 and landedAt ~= nil and math.abs(y1 - LIFT) < 0.05,
+		("вершина %.1f (надо %d), промах %.2f, сел через %.2f с (полёт %.2f)"):format(
+			apex, height, miss, landedAt or -1, flight))
+end
+
+print("8. Кувырок: лёг на спину, полежал, встал и пошёл")
+do
+	local solver = newSolver()
+	local user = spawn(solver, 0, -30)
+	solver:drive(user.b, 0, 0)
+	solver:step(DT)
+	-- Вверх с таким креном, чтобы к посадке сделать пол-оборота: ляжет на спину.
+	solver:knock(user.b, 0, 12, 0, math.pi / (2 * 12 / CFG.gravity))
+	local maxRoll, onBackMoved, t, onBack = 0, 0, 0, 0
+	local lastX, _, lastZ = solver:pivot(user.b)
+	local stoodAt = nil
+	for _ = 1, 360 do
+		solver:drive(user.b, 0, 8, 0, 1)
+		solver:step(DT)
+		t += DT
+		local roll = solver.roll[user.b]
+		maxRoll = math.max(maxRoll, math.abs(roll))
+		local x, _, z = solver:pivot(user.b)
+		if not solver:airborne(user.b) and math.abs(roll) > math.pi / 2 then
+			onBack += DT
+			onBackMoved += math.sqrt((x - lastX) ^ 2 + (z - lastZ) ^ 2)
+		end
+		if not stoodAt and t > 0.5 and math.abs(roll) < 0.1 then
+			stoodAt = t
+		end
+		lastX, lastZ = x, z
+	end
+	local _, _, z = solver:pivot(user.b)
+	check(onBack >= CFG.flipTime and onBackMoved < 0.3 and stoodAt ~= nil and z > -25,
+		("крен до %.1f рад, на спине %.2f с (надо от %.1f), прополз %.2f, встал через %.2f с, ушёл до z=%.1f"):format(
+			maxRoll, onBack, CFG.flipTime, onBackMoved, stoodAt or -1, z))
+	local lx, ly, lz, ux, uy, uz = solver:tilt(user.b)
+	check(math.abs(lx * ux + ly * uy + lz * uz) < 1e-3 and uy > 0.99,
+		("кадр после кувырка ровный: верх (%.2f, %.2f, %.2f)"):format(ux, uy, uz))
+end
+
+print("9. Грызущий тяжелее: толпа его почти не сдвигает")
+do
+	local function pushed(heavy)
+		local solver = newSolver()
+		local chewer = spawn(solver, 0, 20)
+		local crowd = {}
+		for i = 1, 6 do
+			table.insert(crowd, spawn(solver, -6 + i * 2.2, 14 - (i % 2) * 2.5))
+		end
+		local x0, _, z0 = solver:pivot(chewer.b)
+		for _ = 1, 120 do
+			solver:drive(chewer.b, 0, 0, 0, 1, heavy)
+			for _, u in crowd do
+				local x, _, z = solver:pivot(u.b)
+				local dx, dz = -x, 20 - z
+				local len = math.max(math.sqrt(dx * dx + dz * dz), 1e-3)
+				solver:drive(u.b, dx / len * 8, dz / len * 8, dx / len, dz / len)
+			end
+			solver:step(DT)
+		end
+		local x1, _, z1 = solver:pivot(chewer.b)
+		return math.sqrt((x1 - x0) ^ 2 + (z1 - z0) ^ 2)
+	end
+	local light, heavy = pushed(1), pushed(CFG.holdMass)
+	check(heavy < light, ("обычного сдвинули на %.2f, грызущего на %.2f"):format(light, heavy))
 end
 
 print(failures == 0 and "Всё прошло." or ("Провалов: %d"):format(failures))

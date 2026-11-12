@@ -838,30 +838,43 @@ end
 
 -- Стены, постройки и стол — те же проверки, что у старой толкучки, по центру тела.
 -- me.x/me.z — где центр был подшагом раньше; home — куда вёл маршрут (см. Resolve выше).
-local function softBound(me, x, z, fx, fz, h)
-	local homeX, homeZ = clampXZ(me.softHomeX or x, me.softHomeZ or z)
-	local bare = me.softBare
-	local caged = insideBuilding(homeX, homeZ)
+-- above — на сколько ступни над полом: летящий (толчок, подброс) выше постройки под собой
+-- её не задевает, а над пустым полом — выше SOFT.flyOver.
+local function softBound(me, x, z, fx, fz, h, above)
 	x, z = clampXZ(x, z)
 	if not offFloor(me.x, me.z) and not offFloor(x, z) then
 		x, z = insideWalls(me, x, z, fx, fz)
 	end
-	if not caged and occupied(x, homeZ, me, bare) then
-		x = homeX
-	end
-	if not caged and occupied(x, z, me, bare) then
-		z = homeZ
-	end
-	if not insideBuilding(me.x, me.z) then
-		if occupied(x, me.z, me, true) then
-			x = me.x
+	local overhead = false
+	if above and above > 0.5 and not offFloor(x, z) then
+		local blocker = Grid.GetOccupant(Arena.ToCell(Vector3.new(x, 0, z)))
+		if blocker then
+			overhead = above > (blocker:GetAttribute("Height") or math.huge)
+		else
+			overhead = above > SOFT.flyOver
 		end
-		if occupied(x, z, me, true) then
-			z = me.z
-		end
-		x, z = outOfBuildings(me, x, z, fx, fz, h)
 	end
-	x, z = outOfTable(me, x, z, fx, fz)
+	if not overhead then
+		local homeX, homeZ = clampXZ(me.softHomeX or x, me.softHomeZ or z)
+		local bare = me.softBare
+		local caged = insideBuilding(homeX, homeZ)
+		if not caged and occupied(x, homeZ, me, bare) then
+			x = homeX
+		end
+		if not caged and occupied(x, z, me, bare) then
+			z = homeZ
+		end
+		if not insideBuilding(me.x, me.z) then
+			if occupied(x, me.z, me, true) then
+				x = me.x
+			end
+			if occupied(x, z, me, true) then
+				z = me.z
+			end
+			x, z = outOfBuildings(me, x, z, fx, fz, h)
+		end
+		x, z = outOfTable(me, x, z, fx, fz)
+	end
 	me.x, me.z = x, z
 	return x, z
 end
@@ -1041,12 +1054,23 @@ function noteRigid(spent)
 	rigidFrame += spent
 end
 
--- Resolve мягкого жука: желаемая точка — в желаемую скорость, назад — решённый пивот.
-function resolveSoft(me, desired, dt, facing, bare)
+-- Resolve мягкого жука: желаемая точка — в желаемую скорость, назад — решённый пивот,
+-- ход и наклон тела (голова с тангажом и верх с креном — для кадра жука).
+-- ram — Таран в разгоне: тяжелее, толпа его не держит.
+function resolveSoft(me, desired, dt, facing, bare, ram)
 	frameTick(dt)
 	local b = me.soft
 	if not b then
 		return desired, facing
+	end
+	-- Толчки (шаг 2): Effects, пила и лента копят смещение в атрибуте Push, решатель
+	-- забирает его целиком и превращает в скорость. Атрибут меняется дважды на толчок,
+	-- а не каждый кадр, как при старом затухании.
+	local model = me.model
+	local push = model:GetAttribute("Push")
+	if push then
+		model:SetAttribute("Push", nil)
+		solver:shove(b, push.X, push.Z)
 	end
 	local fx, fz = flatUnit(facing)
 	local dx, dz = desired.X - me.softX, desired.Z - me.softZ
@@ -1059,12 +1083,51 @@ function resolveSoft(me, desired, dt, facing, bare)
 		dx, dz = 0, 0
 	end
 	local inv = if dt > 1e-4 then 1 / dt else 0
-	solver:drive(b, dx * inv, dz * inv, fx, fz)
+	-- Грызущий держится за постройку жвалами, Таран в разгоне несётся: обоих толпа почти
+	-- не сдвигает.
+	local heavy = if ram then SOFT.ramMass elseif model:GetAttribute("Chewing") then SOFT.holdMass else 1
+	solver:drive(b, dx * inv, dz * inv, fx, fz, heavy)
 	me.softHomeX, me.softHomeZ, me.softBare = desired.X, desired.Z, bare
 
 	local x, y, z, ax, az = solver:pivot(b)
 	me.softX, me.softY, me.softZ = x, y, z
-	return Vector3.new(x, y, z), Vector3.new(ax, 0, az)
+	local lx, ly, lz, ux, uy, uz = solver:tilt(b)
+	return Vector3.new(x, y, z), Vector3.new(ax, 0, az), Vector3.new(lx, ly, lz), Vector3.new(ux, uy, uz)
+end
+
+-- Ведёт ли жука толпа на точках.
+function Crowd.IsSoft(model)
+	local record = byModel[model]
+	return record ~= nil and record.soft ~= nil
+end
+
+-- Бросок мягкого жука с начальной скоростью (подброс Атмосферы): дальше дуга решателя.
+function Crowd.Launch(model, velocity)
+	local record = byModel[model]
+	if record and record.soft then
+		solver:knock(record.soft, velocity.X, velocity.Y, velocity.Z, 0)
+	end
+end
+
+-- Летит ли мягкий жук от толчка или броска.
+function Crowd.Airborne(model)
+	local record = byModel[model]
+	return record ~= nil and record.soft ~= nil and solver:airborne(record.soft)
+end
+
+-- Ход мягкого жука без желания идти (в полёте): то же, что Resolve на месте.
+function Crowd.Hold(model, dt)
+	local record = byModel[model]
+	if not (record and record.soft) then
+		return nil
+	end
+	return resolveSoft(record, Vector3.new(record.softX, record.softY, record.softZ), dt, nil, false)
+end
+
+-- Скорость броска мягкого жука из from на высоту height с посадкой в to (по горизонтали).
+function Crowd.TossVelocity(from, to, height)
+	local vx, vy, vz = CrowdSolver.tossVelocity(SOFT, to.X - from.X, to.Z - from.Z, height)
+	return Vector3.new(vx, vy, vz)
 end
 
 -- Куда встанет лапа в точке (x, z) у тела на высоте bodyY: высота и сосед, на котором
@@ -1216,13 +1279,15 @@ end
 -- bare — см. occupied: жук упёрся грызть постройку и может встать вплотную к её следу.
 --
 -- Незарегистрированный жук проходит насквозь, как и раньше: модуль ни на кого не обязателен.
-function Crowd.Resolve(model, desired, dt, facing, bare)
+-- У мягкого жука (Workspace.SoftCrowd) третье и четвёртое значение — голова с тангажом
+-- и верх с креном для кадра жука; ram — Таран в разгоне (только мягкой толпе).
+function Crowd.Resolve(model, desired, dt, facing, bare, ram)
 	local me = byModel[model]
 	if not me then
 		return desired, facing
 	end
 	if me.soft then
-		return resolveSoft(me, desired, dt, facing, bare)
+		return resolveSoft(me, desired, dt, facing, bare, ram)
 	end
 	local started = os.clock()
 	local position, turned = resolveRigid(me, desired, dt, facing, bare)

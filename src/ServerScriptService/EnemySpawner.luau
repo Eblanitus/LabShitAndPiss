@@ -21,6 +21,8 @@ local EnemyProgress = require(ServerScriptService:WaitForChild("EnemyProgress"))
 local EnemyBody = require(ReplicatedStorage:WaitForChild("EnemyBody"))
 local Corpses = require(ServerScriptService:WaitForChild("Corpses"))
 local PhysicsFX = require(ReplicatedStorage:WaitForChild("PhysicsFX"))
+-- Подброс мягкого жука (толпа на точках): раньше этого посадкой не считается — он ещё на полу.
+local SOFT_TOSS_LAND = PhysicsFX.crowd.tossLand
 local Effects = require(ReplicatedStorage:WaitForChild("Effects"))
 -- Касты и особые механики — всё, что различает виды.
 -- Здесь осталось только общее: ходьба по маршруту, грызня, перелезание, смерть.
@@ -631,7 +633,30 @@ local function moveThroughArena(enemy, enemyData, offset, onBreach, state)
 		-- Подброс Атмосферы (Effects.OnToss): жук летит по дуге в выбранную точку и сам
 		-- не идёт. Приземлился — маршрут считается заново оттуда, где он упал.
 		local toss = state.toss
-		if toss then
+		if toss and Crowd.IsSoft(enemy) then
+			-- Толпа на точках (Workspace.SoftCrowd): не дуга по времени, а бросок. Вверх — так,
+			-- чтобы дуга решателя поднялась на высоту броска, вбок — чтобы упасть в выбранную
+			-- клетку. Дальше тяжесть, соседи и стены — как у любого тела. Сел — идёт дальше.
+			if not toss.launched then
+				toss.launched = true
+				Crowd.Launch(enemy, Crowd.TossVelocity(toss.from, toss.to, toss.height))
+			end
+			local position, facing, look, up = Crowd.Hold(enemy, dt)
+			if position then
+				enemy:PivotTo(CFrame.lookAt(position, position + look, up) * CFrame.Angles(0, math.pi, 0))
+				state.pathPosition = position
+			end
+			setVelocity((toss.to - toss.from) / toss.duration)
+			local landed = now - toss.start > SOFT_TOSS_LAND and not Crowd.Airborne(enemy)
+			if landed or now - toss.start > toss.duration * 3 + 2 then
+				state.toss = nil
+				climb = nil
+				dirty = true
+				lastRepath = 0
+				enemy:SetAttribute("Tossed", nil)
+			end
+			continue
+		elseif toss then
 			local t = math.min((now - toss.start) / toss.duration, 1)
 			local position = toss.from:Lerp(toss.to, t) + Vector3.new(0, toss.height * 4 * t * (1 - t), 0)
 			enemy:PivotTo(CFrame.new(position) * enemy:GetPivot().Rotation)
@@ -779,7 +804,8 @@ local function moveThroughArena(enemy, enemyData, offset, onBreach, state)
 				end
 			end
 
-			if blocker and not climb and not stunned and not confused then
+			-- Летящий от толчка (толпа на точках) за преграду не цепляется: сядет — решит.
+			if blocker and not climb and not stunned and not confused and not Crowd.Airborne(enemy) then
 				local mode = Grid.Crossing(blocker, profile)
 				if mode == "climb" then
 					climb = planClimb(position, points, cells, index,
@@ -1088,10 +1114,12 @@ local function moveThroughArena(enemy, enemyData, offset, onBreach, state)
 			-- На стене толчок не копится: место жука там задаёт перелезание (desired = точка
 			-- подъёма), и смещение пропадало бы за кадр, оставляя только дёрганье. Как грызущий,
 			-- лезущий держится за преграду.
+			-- Мягкого жука (Workspace.SoftCrowd) толкает сам решатель: атрибут он забирает
+			-- целиком в Crowd.Resolve и превращает в скорость, здесь его не трогаем.
 			local push = enemy:GetAttribute("Push")
 			if push and climb then
 				enemy:SetAttribute("Push", nil)
-			elseif push then
+			elseif push and not Crowd.IsSoft(enemy) then
 				if push.Magnitude > 0.05 then
 					-- Доля за кадр — через экспоненту: путь и скорость отыгрыша не зависят от FPS.
 					local applied = push * (1 - math.exp(-PUSH_DECAY * dt))
@@ -1119,12 +1147,15 @@ local function moveThroughArena(enemy, enemyData, offset, onBreach, state)
 			end
 
 			local resolved = desired
+			-- Наклон тела от толпы на точках: голова с тангажом и верх с креном (кувырок).
+			-- Старая толпа его не даёт — тогда кадр строится как раньше.
+			local tiltLook, tiltUp = nil, nil
 			if climb then
 				Crowd.Park(enemy, resolved, facing)
 			else
 				-- Тела непроницаемы (см. Crowd): толкучка решает не только место, но и разворот —
 				-- длинный жук, довернувшись в тесноте, въехал бы головой или брюшком в соседа.
-				resolved, facing = Crowd.Resolve(enemy, desired, dt, look, bare)
+				resolved, facing, tiltLook, tiltUp = Crowd.Resolve(enemy, desired, dt, look, bare, state.dash ~= nil)
 			end
 
 			-- Жук смотрит туда, куда идёт. Голова у модели по +Z, а LookVector в Roblox — это -Z,
@@ -1137,6 +1168,9 @@ local function moveThroughArena(enemy, enemyData, offset, onBreach, state)
 			-- кадре, без качки, поверх — только вздрагивание и дыхание (см. EnemyGait.Step).
 			-- Два PivotTo за кадр делать нельзя — жук дрожал бы между двумя положениями.
 			local pathCF = CFrame.lookAt(resolved, resolved + facing, facingUp) * CFrame.Angles(0, math.pi, 0)
+			if tiltLook then
+				pathCF = CFrame.lookAt(resolved, resolved + tiltLook, tiltUp) * CFrame.Angles(0, math.pi, 0)
+			end
 			-- След гемолимфы — ТОЛЬКО под Кровотечением (решение автора): капля через каждые
 			-- PhysicsFX.blood.trail.step пройденных studs (× масштаб вида). Атрибут Bleeding ставит Effects.
 			if state.pathPosition and enemy:GetAttribute("Bleeding") then

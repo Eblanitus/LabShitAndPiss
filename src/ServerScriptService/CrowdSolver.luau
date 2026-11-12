@@ -26,6 +26,7 @@ local BODY_KEYS = {
 	"user", "n", "meanOff", "driveX", "driveZ", "wantFx", "wantFz", "fx", "fz", "axisX", "axisZ",
 	"kin", "fresh", "stuck", "stuckExtra", "shake", "shakeX", "shakeZ", "side", "supported",
 	"pressing", "pressX", "pressZ", "dodge", "progress",
+	"air", "roll", "rollVel", "flip", "heavy",
 }
 local POINT_KEYS = {
 	"px", "py", "pz", "ox", "oy", "oz", "vx", "vy", "vz", "off", "r", "hc", "hs", "lift", "w", "gr", "climb",
@@ -99,6 +100,11 @@ function CrowdSolver:add(user, x, y, z, fx, fz, radius, front, back, shellTop, l
 	self.pressing[b] = false
 	self.pressX[b], self.pressZ[b] = 0, 0
 	self.dodge[b] = 0
+	self.air[b] = false -- летит от толчка: без сцепления, без потолка подъёма
+	self.roll[b] = 0 -- крен, рад: кувырок в полёте, на спине больше пол-оборота
+	self.rollVel[b] = 0
+	self.flip[b] = 0 -- сколько секунд лежит на спине
+	self.heavy[b] = 1 -- во сколько раз тяжелее обычного сейчас (грызёт, разгон)
 	self.progress[b] = 0
 
 	-- Объём по высоте — от ступней (пивот минус lift) до верха спины: под брюхом крупного
@@ -196,10 +202,15 @@ function CrowdSolver:place(b, x, y, z, fx, fz)
 	self.fresh[b] = false
 	self.stuck[b] = 0
 	self.shake[b] = 0
+	self.air[b] = false
+	self.roll[b], self.rollVel[b], self.flip[b] = 0, 0, 0
 end
 
 -- Привод на следующий шаг: желаемая скорость по горизонтали и куда тело хочет смотреть.
-function CrowdSolver:drive(b, vx, vz, wantFx, wantFz)
+-- heavy — во сколько раз тело сейчас тяжелее обычного (грызёт, разгон Тарана): толпа его
+-- двигает во столько же раз меньше.
+function CrowdSolver:drive(b, vx, vz, wantFx, wantFz, heavy)
+	self.heavy[b] = heavy or 1
 	self.driveX[b], self.driveZ[b] = vx, vz
 	if wantFx then
 		self.wantFx[b], self.wantFz[b] = wantFx, wantFz
@@ -241,6 +252,120 @@ function CrowdSolver:advance(b)
 	return self.progress[b]
 end
 
+-- Летит ли тело от толчка (ещё не приземлилось).
+function CrowdSolver:airborne(b)
+	return self.air[b]
+end
+
+-- Толчок: прибавка скорости всем точкам тела. Вверх — отрыв от опоры, дальше тяжесть.
+-- spin — прибавка скорости крена (рад/сек): кувырок.
+function CrowdSolver:knock(b, vx, vy, vz, spin)
+	local base = (b - 1) * STRIDE
+	for k = 1, self.n[b] do
+		local i = base + k
+		self.vx[i] += vx
+		self.vy[i] += vy
+		self.vz[i] += vz
+	end
+	if vy > 0 then
+		self.air[b] = true
+		self.supported[b] = false
+	end
+	self.rollVel[b] += spin or 0
+	self.kin[b] = false
+end
+
+-- Скорость толчка, с которой одиночное тело на ровном полу уходит на distance studs:
+-- горизонтальная и вертикальная. Малый толчок — скольжение по полу (его гасит сцепление),
+-- больший — отрыв с подъёмом knockLift от горизонтали: полёт по дуге (с сопротивлением
+-- воздуха) и скольжение после посадки. Скольжение считается так же, как его шагает решатель
+-- (подшаг cfg.step); горизонталь подбирается делением пополам — толчок редкий, это дёшево.
+function CrowdSolver.knockVelocity(cfg, distance)
+	local h = cfg.step
+	local a = math.exp(-cfg.traction * h)
+	local slide = h * a / (1 - a) -- studs скольжения на каждый stud/сек скорости
+	if distance < cfg.knockLiftFrom then
+		return distance / slide, 0
+	end
+	local lift, g, k = cfg.knockLift, cfg.gravity, cfg.airDrag
+	local function reach(vh)
+		local t = 2 * lift * vh / g
+		local keep = math.exp(-k * t)
+		local air = if k > 1e-6 then vh * (1 - keep) / k else vh * t
+		return air + vh * keep * slide
+	end
+	local lo, hi = 0, cfg.maxSpeed
+	for _ = 1, 30 do
+		local mid = (lo + hi) / 2
+		if reach(mid) < distance * cfg.knockScale then
+			lo = mid
+		else
+			hi = mid
+		end
+	end
+	return lo, lo * lift
+end
+
+-- Скорость броска на высоту height, чтобы упасть в (dx, dz) от точки броска на той же
+-- высоте: вверх — по тяжести, вбок — с поправкой на сопротивление воздуха.
+function CrowdSolver.tossVelocity(cfg, dx, dz, height)
+	local g, k = cfg.gravity, cfg.airDrag
+	local up = math.sqrt(2 * g * math.max(height, 0))
+	local t = math.max(2 * up / g, 1e-3)
+	local per = if k > 1e-6 then k / (1 - math.exp(-k * t)) else 1 / t
+	return dx * per, up, dz * per
+end
+
+-- Толчок смещением (атрибут Push: вектор в studs по горизонтали). Сильный — с кувырком
+-- в случайную сторону.
+function CrowdSolver:shove(b, offsetX, offsetZ)
+	local distance = math.sqrt(offsetX * offsetX + offsetZ * offsetZ)
+	if distance < 1e-3 then
+		return
+	end
+	local cfg = self.cfg
+	local vh, vy = CrowdSolver.knockVelocity(cfg, distance)
+	local spin = 0
+	if vh > cfg.tumbleFrom then
+		spin = (vh - cfg.tumbleFrom) * cfg.tumble * (math.random() < 0.5 and -1 or 1)
+	end
+	self:knock(b, offsetX / distance * vh, vy, offsetZ / distance * vh, spin)
+end
+
+-- Наклон тела для кадра жука: куда смотрит голова (с тангажом от разной высоты точек)
+-- и где у него верх (с креном кувырка).
+function CrowdSolver:tilt(b)
+	local n = self.n[b]
+	local base = (b - 1) * STRIDE
+	local ax, ay, az = self.fx[b], 0, self.fz[b]
+	if n >= 2 then
+		local f, t = base + 1, base + n
+		local dx, dy, dz = self.px[f] - self.px[t], self.py[f] - self.py[t], self.pz[f] - self.pz[t]
+		local len = math.sqrt(dx * dx + dy * dy + dz * dz)
+		if len > 1e-4 then
+			ax, ay, az = dx / len, dy / len, dz / len
+		end
+	end
+	-- Мелкий тангаж от толкотни не показывается: тело на ровном полу стоит ровно.
+	if math.abs(ay) < self.cfg.pitchDeadzone then
+		local flat = math.sqrt(ax * ax + az * az)
+		if flat > 1e-4 then
+			ax, ay, az = ax / flat, 0, az / flat
+		end
+	end
+	-- Вправо: голова x мировой верх; верх тела: вправо x голова, повёрнутый на крен.
+	local rx, rz = -az, ax
+	local rl = math.sqrt(rx * rx + rz * rz)
+	if rl < 1e-4 then
+		rx, rz, rl = 1, 0, 1
+	end
+	rx, rz = rx / rl, rz / rl
+	local ux, uy, uz = -rz * ay, rz * ax - rx * az, rx * ay
+	local roll = self.roll[b]
+	local c, s = math.cos(roll), math.sin(roll)
+	return ax, ay, az, ux * c + rx * s, uy * c, uz * c + rz * s
+end
+
 local function cellKey(x, z, cell)
 	return (math.floor(x / cell) + 32768) * 65536 + math.floor(z / cell) + 32768
 end
@@ -259,6 +384,7 @@ function CrowdSolver:substep(h)
 	local stuck, stuckExtra, shake, shakeX, shakeZ, side = self.stuck, self.stuckExtra, self.shake, self.shakeX, self.shakeZ, self.side
 	local supported, pressing, pressX, pressZ, progress = self.supported, self.pressing, self.pressX, self.pressZ, self.progress
 	local dodge = self.dodge
+	local air, rolls, rollVel, flip, heavy = self.air, self.roll, self.rollVel, self.flip, self.heavy
 	local ground, turnStep, bound = self.ground, self.turnStep, self.bound
 
 	local gravity = cfg.gravity
@@ -328,10 +454,39 @@ function CrowdSolver:substep(h)
 				dvz = shakeZ[b] * cfg.shakeSpeed
 			end
 
+			-- Полёт кончается, когда тело снова на опоре. Кувырок: в полёте крен крутится,
+			-- на опоре гаснет. Легший на спину (крен больше пол-оборота) лежит flipTime
+			-- и не идёт, потом переворачивается обратно.
+			if air[b] and supported[b] then
+				air[b] = false
+			end
+			local roll = rolls[b]
+			if air[b] then
+				roll += rollVel[b] * h
+			else
+				rollVel[b] = 0
+				if math.abs(roll) > math.pi / 2 then
+					flip[b] += h
+					if flip[b] >= cfg.flipTime then
+						roll -= math.sign(roll) * cfg.standSpeed * h
+					end
+					dvx, dvz = 0, 0
+				else
+					flip[b] = 0
+					roll *= math.exp(-cfg.rollSettle * h)
+				end
+			end
+			if roll > math.pi then
+				roll -= 2 * math.pi
+			elseif roll < -math.pi then
+				roll += 2 * math.pi
+			end
+			rolls[b] = roll
+
 			-- Обгон: упёршись в того, кто впереди, жук берёт вбок — на ту сторону, где он и так
 			-- чуть левее или правее соседа. Так толпа течёт рядами и обтекает, а не стоит колонной.
 			local side = dodge[b]
-			if side ~= 0 and shake[b] <= 0 and want > minDrive then
+			if side ~= 0 and shake[b] <= 0 and want > minDrive and math.abs(roll) <= math.pi / 2 then
 				local push = cfg.sidestep * want * math.sign(side)
 				dvx += -driveZ[b] / want * push
 				dvz += driveX[b] / want * push
@@ -469,8 +624,8 @@ function CrowdSolver:substep(h)
 		for p = 1, pairs do
 			local i, j = pairA[p], pairB[p]
 			local bi, bj = (i - 1) // STRIDE + 1, (j - 1) // STRIDE + 1
-			local wi = kin[bi] and 0 or w[i]
-			local wj = kin[bj] and 0 or w[j]
+			local wi = kin[bi] and 0 or w[i] / heavy[bi]
+			local wj = kin[bj] and 0 or w[j] / heavy[bj]
 			local wsum = wi + wj
 			if wsum > 0 then
 				local dx, dz = px[i] - px[j], pz[i] - pz[j]
@@ -545,7 +700,8 @@ function CrowdSolver:substep(h)
 		end
 
 		-- Опора: точка не ниже пола под ней. И не выше maxLayers ростов тела над ним: давка
-		-- клиньями выжимает тела вверх, и без потолка куча у стены росла башней.
+		-- клиньями выжимает тела вверх, и без потолка куча у стены росла башней. Летящего
+		-- от толчка потолок не держит.
 		for b = 1, count do
 			if not kin[b] then
 				local base = (b - 1) * STRIDE
@@ -555,7 +711,7 @@ function CrowdSolver:substep(h)
 					if py[i] < floor then
 						py[i] = floor
 						supported[b] = true
-					else
+					elseif not air[b] then
 						local top = floor + maxLayers * 2 * hs[i]
 						if py[i] > top then
 							py[i] = top
@@ -593,7 +749,13 @@ function CrowdSolver:substep(h)
 				end
 				local mean = meanOff[b]
 				cx, cz = cx / nb - ax * mean, cz / nb - az * mean
-				local x, z = bound(user[b], cx, cz, ax, az, h)
+				-- На сколько ступни над полом: летящий над постройкой её не задевает.
+				local above = math.huge
+				for k = 1, nb do
+					local i = base + k
+					above = math.min(above, py[i] - gr[i])
+				end
+				local x, z = bound(user[b], cx, cz, ax, az, h, above)
 				local sx, sz = x - cx, z - cz
 				if sx ~= 0 or sz ~= 0 then
 					for k = 1, nb do
@@ -609,7 +771,7 @@ function CrowdSolver:substep(h)
 			for k = 1, nb do
 				local i = base + k
 				local x, y, z = (px[i] - ox[i]) / h, (py[i] - oy[i]) / h, (pz[i] - oz[i]) / h
-				if y > maxRise then
+				if y > maxRise and not air[b] then
 					y = maxRise
 				elseif y < -maxFall then
 					y = -maxFall
