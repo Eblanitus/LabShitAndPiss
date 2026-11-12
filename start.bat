@@ -5,7 +5,11 @@ rem Изменения кода Rojo сразу переносит в Studio. О
 cd /d "%~dp0"
 
 if not exist rojo.exe (
-  echo Нет rojo.exe в папке проекта. Положи его рядом с этим файлом.
+  echo Нет rojo.exe - скачиваю Rojo 7.7.0 с GitHub...
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; try { Invoke-WebRequest -UseBasicParsing 'https://github.com/rojo-rbx/rojo/releases/download/v7.7.0/rojo-7.7.0-windows-x86_64.zip' -OutFile 'rojo.zip'; Expand-Archive -Force 'rojo.zip' 'rojo_tmp'; Move-Item -Force 'rojo_tmp\rojo.exe' 'rojo.exe' } catch { Write-Host $_.Exception.Message } finally { Remove-Item -Force -Recurse -ErrorAction SilentlyContinue 'rojo.zip','rojo_tmp' }"
+)
+if not exist rojo.exe (
+  echo Не удалось скачать rojo.exe. Скачай вручную: https://github.com/rojo-rbx/rojo/releases и положи рядом с этим файлом.
   pause
   exit /b
 )
