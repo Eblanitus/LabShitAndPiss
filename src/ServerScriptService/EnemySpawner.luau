@@ -23,6 +23,11 @@ local Corpses = require(ServerScriptService:WaitForChild("Corpses"))
 local PhysicsFX = require(ReplicatedStorage:WaitForChild("PhysicsFX"))
 -- Подброс мягкого жука (толпа на точках): раньше этого посадкой не считается — он ещё на полу.
 local SOFT_TOSS_LAND = PhysicsFX.crowd.tossLand
+-- Перелезание телом (толпа на точках): запас высоты к разрешению лезть, на сколько близко
+-- к точке выхода считается «перелез» и во сколько раз дольше расчёта жук пробует, прежде чем бросить.
+local SOFT_CLIMB_MARGIN = PhysicsFX.crowd.climbMargin
+local SOFT_CLIMB_EXIT = PhysicsFX.crowd.climbExit
+local SOFT_CLIMB_GIVEUP = PhysicsFX.crowd.climbGiveUp
 local Effects = require(ReplicatedStorage:WaitForChild("Effects"))
 -- Касты и особые механики — всё, что различает виды.
 -- Здесь осталось только общее: ходьба по маршруту, грызня, перелезание, смерть.
@@ -320,6 +325,10 @@ local function planClimb(position, points, cells, index, climbHeight, climbSpeed
 	return {
 		height = peak,
 		horizontal = horizontal,
+		-- Для перелезания телом (толпа на точках): куда выйти, с какой скоростью лезть, ширина.
+		exit = exitPoint,
+		speed = climbSpeed,
+		span = span,
 		time = 0,
 		leg = 1,
 		-- «Верх» жука на подъёме и спуске — это сторона ОТ стены: брюхом он прижат
@@ -810,6 +819,14 @@ local function moveThroughArena(enemy, enemyData, offset, onBreach, state)
 				if mode == "climb" then
 					climb = planClimb(position, points, cells, index,
 						profile.climbHeight, profile.climbSpeed, speed, scale)
+					if climb and Crowd.IsSoft(enemy) then
+						-- Толпа на точках: не отрезки по таймеру, а телом — идёт к точке выхода,
+						-- упирается в стену, лезет по ней, идёт по крыше, слезает (см. ветку ниже).
+						climb.soft = true
+						climb.started = now
+						climb.limit = (2 * climb.height / climb.speed + climb.span / math.max(speed, 0.1))
+							* SOFT_CLIMB_GIVEUP + SOFT_CLIMB_GIVEUP
+					end
 					if climb then
 						print(("[Преграда] %s лезет через %s (высота %.1f)")
 							:format(enemy.Name, blocker.Name, climb.height))
@@ -896,6 +913,40 @@ local function moveThroughArena(enemy, enemyData, offset, onBreach, state)
 				setVelocity(moving and move.Magnitude > 1e-3 and heading * fleeSpeed or Vector3.zero)
 				-- Отбежав, он сошёл с маршрута: путь надо будет считать заново.
 				dirty = true
+			elseif climb and climb.soft then
+				-- Перелезание телом (толпа на точках). Маршрут даёт только разрешение лезть на эту
+				-- высоту с этой скоростью и направление к точке выхода; стену, крышу и спуск решатель
+				-- отыгрывает точками, вверх и вниз — со скоростью подъёма (цена в Grid та же).
+				-- Жук, как и раньше, остаётся наземным: Flying не появляется.
+				local slowPercent = enemy:GetAttribute("SlowPercent") or 0
+				local climbRate = climb.speed * (1 - slowPercent)
+				Crowd.Climb(enemy, climbRate, climb.height + SOFT_CLIMB_MARGIN)
+				local perch = Crowd.Perch(enemy)
+				pose = perch == "wall" and "climb" or "walk"
+				local toExit = flat(climb.exit - position)
+				local passed = toExit.Magnitude < SOFT_CLIMB_EXIT or toExit:Dot(climb.horizontal) <= 0
+				if passed and perch == "ground" then
+					-- Слез по ту сторону: маршрут сразу заново (как у перелезания по таймеру).
+					climb = nil
+					Crowd.Climb(enemy, 0, 0)
+					dirty = true
+					lastRepath = 0
+					setVelocity(Vector3.zero)
+				elseif now - climb.started > climb.limit then
+					-- Не вышло телом (затёрли, сбросили): бросает, маршрут решит заново.
+					print(("[Преграда] %s не перелез телом за %.0f с, маршрут заново"):format(enemy.Name, climb.limit))
+					climb = nil
+					Crowd.Climb(enemy, 0, 0)
+					dirty = true
+					lastRepath = 0
+				else
+					local walk = speed * (1 - slowPercent) * groundScale
+					if toExit.Magnitude > 1e-3 then
+						heading = toExit.Unit
+					end
+					desired = position + heading * walk * dt
+					setVelocity(if perch == "wall" then Vector3.new(0, climbRate, 0) else heading * walk)
+				end
 			elseif climb then
 				-- Перелезание. Жук при этом ОСТАЁТСЯ НАЗЕМНЫМ (подтверждённое правило физики):
 				-- атрибут Flying не появляется, все земные турели, зоны Землетрясения и цепь
@@ -1150,7 +1201,7 @@ local function moveThroughArena(enemy, enemyData, offset, onBreach, state)
 			-- Наклон тела от толпы на точках: голова с тангажом и верх с креном (кувырок).
 			-- Старая толпа его не даёт — тогда кадр строится как раньше.
 			local tiltLook, tiltUp = nil, nil
-			if climb then
+			if climb and not climb.soft then
 				Crowd.Park(enemy, resolved, facing)
 			else
 				-- Тела непроницаемы (см. Crowd): толкучка решает не только место, но и разворот —

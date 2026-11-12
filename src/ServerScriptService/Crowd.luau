@@ -836,48 +836,159 @@ end
 -- кадра (отставание в кадр). Серверных лап у мягкого жука нет: высоту дают тяжесть, пол
 -- и спины соседей.
 
--- Стены, постройки и стол — те же проверки, что у старой толкучки, по центру тела.
--- me.x/me.z — где центр был подшагом раньше; home — куда вёл маршрут (см. Resolve выше).
--- above — на сколько ступни над полом: летящий (толчок, подброс) выше постройки под собой
--- её не задевает, а над пустым полом — выше SOFT.flyOver.
+-- Центр тела держится на полу арены и в коридоре (как у старой толкучки). Твёрдое —
+-- стены, мебель, постройки, стол — решатель держит сам, каждой точкой (шаг 3): карта
+-- расстояний до стен и следы построек ниже.
 local function softBound(me, x, z, fx, fz, h, above)
 	x, z = clampXZ(x, z)
-	if not offFloor(me.x, me.z) and not offFloor(x, z) then
-		x, z = insideWalls(me, x, z, fx, fz)
-	end
-	local overhead = false
-	if above and above > 0.5 and not offFloor(x, z) then
-		local blocker = Grid.GetOccupant(Arena.ToCell(Vector3.new(x, 0, z)))
-		if blocker then
-			overhead = above > (blocker:GetAttribute("Height") or math.huge)
-		else
-			overhead = above > SOFT.flyOver
-		end
-	end
-	if not overhead then
-		local homeX, homeZ = clampXZ(me.softHomeX or x, me.softHomeZ or z)
-		local bare = me.softBare
-		local caged = insideBuilding(homeX, homeZ)
-		if not caged and occupied(x, homeZ, me, bare) then
-			x = homeX
-		end
-		if not caged and occupied(x, z, me, bare) then
-			z = homeZ
-		end
-		if not insideBuilding(me.x, me.z) then
-			if occupied(x, me.z, me, true) then
-				x = me.x
-			end
-			if occupied(x, z, me, true) then
-				z = me.z
-			end
-			x, z = outOfBuildings(me, x, z, fx, fz, h)
-		end
-		x, z = outOfTable(me, x, z, fx, fz)
-	end
 	me.x, me.z = x, z
 	return x, z
 end
+
+-- Карта расстояний до неподвижных стен и мебели у края пола (те же детали, что у insideWalls:
+-- папки EDGE_FOLDERS, на уровне тела). Запекается на локацию: клетки, накрытые деталью, —
+-- твёрдые, дальше расстояние до границы двумя проходами (шаг 1 и диагональ √2).
+local function bakeField()
+	local cell = SOFT.fieldCell
+	local lane = Arena.lane
+	local minX, maxX, minZ, maxZ = MIN_X - EDGE_SEEK, MAX_X + EDGE_SEEK, MIN_Z - EDGE_SEEK, MAX_Z + EDGE_SEEK
+	if lane then
+		minX, maxX = math.min(minX, lane.minX - EDGE_SEEK), math.max(maxX, lane.maxX + EDGE_SEEK)
+		minZ, maxZ = math.min(minZ, lane.minZ - EDGE_SEEK), math.max(maxZ, lane.maxZ + EDGE_SEEK)
+	end
+	local w = math.ceil((maxX - minX) / cell) + 1
+	local h = math.ceil((maxZ - minZ) / cell) + 1
+	local solid = table.create(w * h, false)
+	local any = false
+
+	local location = Arena.Location()
+	local floorY = Arena.floorY or 0
+	for _, name in EDGE_FOLDERS do
+		local folder = location:FindFirstChild(name)
+		if folder then
+			for _, part in folder:GetDescendants() do
+				if part:IsA("BasePart") and part.Transparency < 1 then
+					local cf, half = part.CFrame, part.Size / 2
+					local function axis(v)
+						return math.abs(cf.RightVector:Dot(v)) * half.X + math.abs(cf.UpVector:Dot(v)) * half.Y
+							+ math.abs(cf.LookVector:Dot(v)) * half.Z
+					end
+					local c = cf.Position
+					local hx, hy, hz = axis(Vector3.xAxis), axis(Vector3.yAxis), axis(Vector3.zAxis)
+					local pMinX, pMaxX, pMinZ, pMaxZ = c.X - hx, c.X + hx, c.Z - hz, c.Z + hz
+					-- Только то, что за краем пола (как у insideWalls): мебель на самом полу
+					-- маршрут не знает, и жуки упирались бы в неё.
+					local beyond = (pMinX >= MAX_X - EDGE_INSET and pMinX <= MAX_X + EDGE_SEEK)
+						or (pMaxX <= MIN_X + EDGE_INSET and pMaxX >= MIN_X - EDGE_SEEK)
+						or (pMinZ >= MAX_Z - EDGE_INSET and pMinZ <= MAX_Z + EDGE_SEEK)
+						or (pMaxZ <= MIN_Z + EDGE_INSET and pMaxZ >= MIN_Z - EDGE_SEEK)
+					if beyond and c.Y - hy < floorY + 3 and c.Y + hy > floorY + 0.3 then
+						local c0 = math.max(0, math.floor((c.X - hx - minX) / cell))
+						local c1 = math.min(w - 1, math.ceil((c.X + hx - minX) / cell))
+						local r0 = math.max(0, math.floor((c.Z - hz - minZ) / cell))
+						local r1 = math.min(h - 1, math.ceil((c.Z + hz - minZ) / cell))
+						for row = r0, r1 do
+							for col = c0, c1 do
+								-- Центр клетки внутри детали (по её осям, на высоте её середины).
+								local at = cf:PointToObjectSpace(Vector3.new(minX + col * cell, c.Y, minZ + row * cell))
+								if math.abs(at.X) <= half.X and math.abs(at.Z) <= half.Z and math.abs(at.Y) <= half.Y then
+									solid[row * w + col + 1] = true
+									any = true
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	if not any then
+		return nil
+	end
+
+	-- Расстояние от каждой клетки до ближайшей клетки другого рода (снаружи — до стены,
+	-- внутри — до свободной), в studs.
+	local DIAG = math.sqrt(2)
+	local function transform(target)
+		local d = table.create(w * h, math.huge)
+		for i = 1, w * h do
+			if solid[i] == target then
+				d[i] = 0
+			end
+		end
+		for row = 0, h - 1 do
+			for col = 0, w - 1 do
+				local i = row * w + col + 1
+				local v = d[i]
+				if col > 0 then v = math.min(v, d[i - 1] + 1) end
+				if row > 0 then
+					v = math.min(v, d[i - w] + 1)
+					if col > 0 then v = math.min(v, d[i - w - 1] + DIAG) end
+					if col < w - 1 then v = math.min(v, d[i - w + 1] + DIAG) end
+				end
+				d[i] = v
+			end
+		end
+		for row = h - 1, 0, -1 do
+			for col = w - 1, 0, -1 do
+				local i = row * w + col + 1
+				local v = d[i]
+				if col < w - 1 then v = math.min(v, d[i + 1] + 1) end
+				if row < h - 1 then
+					v = math.min(v, d[i + w] + 1)
+					if col < w - 1 then v = math.min(v, d[i + w + 1] + DIAG) end
+					if col > 0 then v = math.min(v, d[i + w - 1] + DIAG) end
+				end
+				d[i] = v
+			end
+		end
+		return d
+	end
+	local toWall, toFree = transform(true), transform(false)
+	local data = table.create(w * h, 0)
+	for i = 1, w * h do
+		-- От центра клетки до границы — на полклетки меньше, чем до центра соседней.
+		if solid[i] then
+			data[i] = -(toFree[i] - 0.5) * cell
+		else
+			data[i] = (toWall[i] - 0.5) * cell
+		end
+	end
+	return { x0 = minX, z0 = minZ, w = w, h = h, cell = cell, data = data }
+end
+
+-- Постройки для решателя: след каждой (Grid.Footprints) с абсолютным верхом (пол под ней
+-- плюс атрибут Height; без него — не лезут) и щелью подлаза, и стол — до неба.
+local function softBoxes()
+	local list = {}
+	for _, rect in Grid.Footprints() do
+		local building = rect.building
+		local height = building:GetAttribute("Height")
+		local cx, cz = (rect.minX + rect.maxX) / 2, (rect.minZ + rect.maxZ) / 2
+		table.insert(list, {
+			minX = rect.minX, maxX = rect.maxX, minZ = rect.minZ, maxZ = rect.maxZ,
+			top = if height then ConcreteFloor.HeightAt(cx, cz) + height else math.huge,
+			gap = building:GetAttribute("CrawlGap") or 0,
+		})
+	end
+	local half = Arena.tableHalf
+	if half and (half.X > 0 or half.Z > 0) then
+		local c = Arena.table
+		table.insert(list, {
+			minX = c.X - half.X, maxX = c.X + half.X, minZ = c.Z - half.Z, maxZ = c.Z + half.Z,
+			top = math.huge, gap = 0,
+		})
+	end
+	return list
+end
+
+local boxesDirty, fieldDirty = true, true
+Grid.Changed.Event:Connect(function()
+	boxesDirty = true
+end)
+Arena.OnChanged(function()
+	boxesDirty, fieldDirty = true, true
+end)
 
 solver = CrowdSolver.new(SOFT, {
 	ground = groundAt,
@@ -895,7 +1006,7 @@ end
 
 function addSoft(record)
 	record.soft = solver:add(record, record.x, record.y, record.z, record.fx, record.fz,
-		record.radius, record.front, record.back, record.top, record.lift, SOFT.mass)
+		record.radius, record.front, record.back, record.top, record.lift, SOFT.mass, record.bodyHeight)
 	record.softX, record.softY, record.softZ = record.x, record.y, record.z
 end
 
@@ -914,10 +1025,17 @@ local function debugOn()
 	return workspace:GetAttribute("SoftCrowdDebug") == true
 end
 
--- Точка внутри постройки (по настоящему следу) или стола: так быть не должно.
-local function pointInside(me, x, z)
-	if occupied(x, z, me, true) then
+-- Точка внутри постройки (по настоящему следу), стены или стола: так быть не должно.
+-- Кто стоит на крыше постройки (лезет по разрешению), тот не внутри.
+local function pointInside(me, x, z, y)
+	local wall = solver:wallDistance(x, z)
+	if wall and wall < 0 then
 		return true
+	end
+	if occupied(x, z, me, true) then
+		local blocker = Grid.GetOccupant(Arena.ToCell(Vector3.new(x, 0, z)))
+		local height = blocker and blocker:GetAttribute("Height")
+		return not (height and y - me.lift >= ConcreteFloor.HeightAt(x, z) + height - 0.1)
 	end
 	local half = Arena.tableHalf
 	if half and (half.X > 0 or half.Z > 0) then
@@ -962,7 +1080,7 @@ local function drawDebug(dt)
 			if part.Size ~= size then
 				part.Size = size
 			end
-			local bad = pointInside(me, x, z)
+			local bad = pointInside(me, x, z, y)
 			inside = inside or bad
 			part.Color = bad and Color3.new(1, 0.2, 0.2) or Color3.new(0.3, 1, 0.5)
 			table.insert(parts, part)
@@ -1019,6 +1137,24 @@ local function frameTick(dt)
 	if solver.count > 0 then
 		debug.profilebegin("CrowdSolver")
 		local started = os.clock()
+		if fieldDirty then
+			fieldDirty = false
+			solver:setField(bakeField())
+		end
+		if boxesDirty then
+			boxesDirty = false
+			solver:setBoxes(softBoxes())
+		end
+		-- Разрешение лезть живёт, пока маршрут его подтверждает (Crowd.Climb); забытое
+		-- снимается, когда тело уже на полу — со стены и с крыши не сдёргивается.
+		for b = 1, solver.count do
+			local record = solver.user[b]
+			if record.softClimbAt and now - record.softClimbAt > SOFT.climbForget
+				and solver:perchOf(b) == CrowdSolver.GROUND then
+				record.softClimbAt = nil
+				solver:allowClimb(b, 0, 0)
+			end
+		end
 		solver.contacts = 0
 		local subs = solver:step(frameDt)
 		for b = 1, solver.count do
@@ -1087,7 +1223,6 @@ function resolveSoft(me, desired, dt, facing, bare, ram)
 	-- не сдвигает.
 	local heavy = if ram then SOFT.ramMass elseif model:GetAttribute("Chewing") then SOFT.holdMass else 1
 	solver:drive(b, dx * inv, dz * inv, fx, fz, heavy)
-	me.softHomeX, me.softHomeZ, me.softBare = desired.X, desired.Z, bare
 
 	local x, y, z, ax, az = solver:pivot(b)
 	me.softX, me.softY, me.softZ = x, y, z
@@ -1122,6 +1257,26 @@ function Crowd.Hold(model, dt)
 		return nil
 	end
 	return resolveSoft(record, Vector3.new(record.softX, record.softY, record.softZ), dt, nil, false)
+end
+
+-- Маршрут велит мягкому жуку перелезть постройку: можно лезть со скоростью speed
+-- (studs/сек) не выше height над полом. Звать каждый кадр, пока перелезание идёт.
+function Crowd.Climb(model, speed, height)
+	local record = byModel[model]
+	if record and record.soft then
+		solver:allowClimb(record.soft, speed, height)
+		record.softClimbAt = time()
+	end
+end
+
+-- Где мягкий жук: "ground", "wall" (лезет по стене постройки) или "top" (на крыше).
+local PERCH_NAMES = { [CrowdSolver.GROUND] = "ground", [CrowdSolver.WALL] = "wall", [CrowdSolver.TOP] = "top" }
+function Crowd.Perch(model)
+	local record = byModel[model]
+	if not (record and record.soft) then
+		return nil
+	end
+	return PERCH_NAMES[solver:perchOf(record.soft)]
 end
 
 -- Скорость броска мягкого жука из from на высоту height с посадкой в to (по горизонтали).

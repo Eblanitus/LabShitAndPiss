@@ -11,7 +11,11 @@
 -- отдаёт положения. Мир он спрашивает через hooks:
 --   ground(x, z) -> y            высота опоры под точкой (пол, обломки, постройки жуков);
 --   turnStep(angle, dt) -> угол  на сколько тело может довернуться за dt;
---   bound(user, x, z, fx, fz, dt) -> x, z   куда тело пускают стены и постройки (по центру).
+--   bound(user, x, z, fx, fz, dt, above) -> x, z   куда пускают центр тела (край пола арены).
+-- Твёрдое — ещё два источника, их владелец отдаёт решателю заранее (шаг 3):
+--   setField   — запечённая карта расстояний до неподвижных стен и мебели (2D, клетка 1 stud);
+--   setBoxes   — постройки и стол: прямоугольники следа с верхом и щелью для подлаза.
+-- Каждая точка выталкивается из них сама, по своему радиусу.
 -- Поэтому его можно гонять в Lune на сцене из чисел (tools/crowd_solver_test.luau).
 --
 -- Все данные — плоские массивы чисел по номеру тела и номеру точки. Точки тела b лежат
@@ -27,10 +31,14 @@ local BODY_KEYS = {
 	"kin", "fresh", "stuck", "stuckExtra", "shake", "shakeX", "shakeZ", "side", "supported",
 	"pressing", "pressX", "pressZ", "dodge", "progress",
 	"air", "roll", "rollVel", "flip", "heavy",
+	"climbV", "climbTop", "bodyH", "perch", "pitchMax",
 }
 local POINT_KEYS = {
-	"px", "py", "pz", "ox", "oy", "oz", "vx", "vy", "vz", "off", "r", "hc", "hs", "lift", "w", "gr", "climb",
+	"px", "py", "pz", "ox", "oy", "oz", "vx", "vy", "vz", "off", "r", "hc", "hs", "lift", "w", "gr", "gb", "climb",
 }
+
+-- Состояние тела для владельца (поза походки): на полу, на стене постройки, на её крыше.
+CrowdSolver.GROUND, CrowdSolver.WALL, CrowdSolver.TOP = 0, 1, 2
 
 function CrowdSolver.new(config, hooks)
 	local self = setmetatable({}, CrowdSolver)
@@ -48,6 +56,12 @@ function CrowdSolver.new(config, hooks)
 	end
 	self.cells = {}
 	self.cellNext = {}
+	-- Постройки (setBoxes) и карта стен (setField).
+	self.boxCount = 0
+	self.boxMinX, self.boxMaxX, self.boxMinZ, self.boxMaxZ = {}, {}, {}, {}
+	self.boxTop, self.boxGap = {}, {}
+	self.boxCells = {}
+	self.field = nil
 	self.pairA = {}
 	self.pairB = {}
 	self.pairCount = 0
@@ -60,7 +74,7 @@ end
 -- Новое тело. Пивот (x, y, z), ход (fx, fz) — единичный, по горизонтали. radius — ширина капсулы,
 -- front/back — торцы вдоль хода от пивота, shellTop — верх спины над пивотом, lift — на сколько
 -- пивот над опорой (ступни). mass — масса тела (по умолчанию у всех 1). Возвращает номер тела.
-function CrowdSolver:add(user, x, y, z, fx, fz, radius, front, back, shellTop, lift, mass)
+function CrowdSolver:add(user, x, y, z, fx, fz, radius, front, back, shellTop, lift, mass, bodyHeight)
 	local b = self.count + 1
 	self.count = b
 	local cfg = self.cfg
@@ -105,6 +119,11 @@ function CrowdSolver:add(user, x, y, z, fx, fz, radius, front, back, shellTop, l
 	self.rollVel[b] = 0
 	self.flip[b] = 0 -- сколько секунд лежит на спине
 	self.heavy[b] = 1 -- во сколько раз тяжелее обычного сейчас (грызёт, разгон)
+	self.climbV[b] = 0 -- можно лезть на постройки: скорость подъёма (0 — нельзя)
+	self.climbTop[b] = 0 -- и на какую высоту над полом
+	self.bodyH[b] = bodyHeight or (shellTop + lift) -- высота спины: пролезет ли под постройкой
+	self.perch[b] = 0
+	self.pitchMax[b] = cfg.maxPitch
 	self.progress[b] = 0
 
 	-- Объём по высоте — от ступней (пивот минус lift) до верха спины: под брюхом крупного
@@ -126,6 +145,7 @@ function CrowdSolver:add(user, x, y, z, fx, fz, radius, front, back, shellTop, l
 		self.lift[i] = lift
 		self.w[i] = w
 		self.gr[i] = y
+		self.gb[i] = y
 		self.climb[i] = 0
 	end
 	self.maxR = math.max(self.maxR, radius)
@@ -204,6 +224,84 @@ function CrowdSolver:place(b, x, y, z, fx, fz)
 	self.shake[b] = 0
 	self.air[b] = false
 	self.roll[b], self.rollVel[b], self.flip[b] = 0, 0, 0
+	self.perch[b] = 0
+end
+
+-- Разрешить телу лезть на постройки (маршрут велит перелезть): скорость подъёма и высота
+-- над полом, выше которой не лезет. speed 0 — нельзя: постройка для него стена до неба.
+-- С разрешением крыша постройки для тела — пол, а спуск с неё — не быстрее подъёма.
+function CrowdSolver:allowClimb(b, speed, height)
+	self.climbV[b] = speed or 0
+	self.climbTop[b] = height or 0
+end
+
+-- На полу, на стене или на крыше (CrowdSolver.GROUND / WALL / TOP).
+function CrowdSolver:perchOf(b)
+	return self.perch[b]
+end
+
+-- Постройки: список { minX, maxX, minZ, maxZ, top, gap } — след, абсолютная высота верха
+-- (math.huge — не лезут) и щель снизу (тело ниже неё пролезает, 0 — нет щели).
+function CrowdSolver:setBoxes(list)
+	local count = #list
+	self.boxCount = count
+	local minX, maxX, minZ, maxZ, top, gap = self.boxMinX, self.boxMaxX, self.boxMinZ, self.boxMaxZ, self.boxTop, self.boxGap
+	table.clear(minX)
+	table.clear(maxX)
+	table.clear(minZ)
+	table.clear(maxZ)
+	table.clear(top)
+	table.clear(gap)
+	local cells = self.boxCells
+	table.clear(cells)
+	local cell = self.cfg.cell
+	for k, box in list do
+		minX[k], maxX[k], minZ[k], maxZ[k] = box.minX, box.maxX, box.minZ, box.maxZ
+		top[k], gap[k] = box.top or math.huge, box.gap or 0
+		-- В корзины, которые след накрывает: точка ищет постройки только в своей корзине,
+		-- поэтому след раздут на самый крупный радиус точки с запасом.
+		local pad = 4
+		for cx = math.floor((box.minX - pad) / cell), math.floor((box.maxX + pad) / cell) do
+			for cz = math.floor((box.minZ - pad) / cell), math.floor((box.maxZ + pad) / cell) do
+				local key = (cx + 32768) * 65536 + cz + 32768
+				local listIn = cells[key]
+				if not listIn then
+					listIn = {}
+					cells[key] = listIn
+				end
+				table.insert(listIn, k)
+			end
+		end
+	end
+end
+
+-- Карта расстояний до стен: { x0, z0, w, h, cell, data } — data[(row) * w + col + 1] —
+-- расстояние от центра клетки до ближайшей стены (внутри стены — минус). nil — стен нет.
+function CrowdSolver:setField(field)
+	self.field = field
+end
+
+-- Расстояние до стены в точке (билинейно) или nil, если точка вне карты.
+local function sampleField(field, x, z)
+	local cell = field.cell
+	local fx = (x - field.x0) / cell
+	local fz = (z - field.z0) / cell
+	local w, hgt = field.w, field.h
+	if fx < 0 or fz < 0 or fx >= w - 1 or fz >= hgt - 1 then
+		return nil
+	end
+	local c0, r0 = math.floor(fx), math.floor(fz)
+	local tx, tz = fx - c0, fz - r0
+	local data = field.data
+	local i = r0 * w + c0 + 1
+	local a, b2 = data[i], data[i + 1]
+	local c, d = data[i + w], data[i + w + 1]
+	return (a * (1 - tx) + b2 * tx) * (1 - tz) + (c * (1 - tx) + d * tx) * tz
+end
+CrowdSolver.sampleField = sampleField
+
+function CrowdSolver:wallDistance(x, z)
+	return self.field and sampleField(self.field, x, z)
 end
 
 -- Привод на следующий шаг: желаемая скорость по горизонтали и куда тело хочет смотреть.
@@ -346,6 +444,15 @@ function CrowdSolver:tilt(b)
 			ax, ay, az = dx / len, dy / len, dz / len
 		end
 	end
+	-- На стене постройки тело показывается задранным вверх по стене (wallPitch), хотя
+	-- точки поднимаются вместе: так жук ползёт по стене, а хребет его не отрывает от неё.
+	if self.perch[b] == CrowdSolver.WALL then
+		local flat = math.sqrt(ax * ax + az * az)
+		if flat > 1e-4 then
+			local pitch = self.cfg.wallPitch
+			ax, ay, az = ax / flat * math.cos(pitch), math.sin(pitch), az / flat * math.cos(pitch)
+		end
+	end
 	-- Мелкий тангаж от толкотни не показывается: тело на ровном полу стоит ровно.
 	if math.abs(ay) < self.cfg.pitchDeadzone then
 		local flat = math.sqrt(ax * ax + az * az)
@@ -385,6 +492,13 @@ function CrowdSolver:substep(h)
 	local supported, pressing, pressX, pressZ, progress = self.supported, self.pressing, self.pressX, self.pressZ, self.progress
 	local dodge = self.dodge
 	local air, rolls, rollVel, flip, heavy = self.air, self.roll, self.rollVel, self.flip, self.heavy
+	local climbV, climbTop, bodyH, perch, pitchMax = self.climbV, self.climbTop, self.bodyH, self.perch, self.pitchMax
+	local gb = self.gb
+	local boxCount, boxCells = self.boxCount, self.boxCells
+	local boxMinX, boxMaxX, boxMinZ, boxMaxZ = self.boxMinX, self.boxMaxX, self.boxMinZ, self.boxMaxZ
+	local boxTop, boxGap = self.boxTop, self.boxGap
+	local field = self.field
+	local cell = cfg.cell
 	local ground, turnStep, bound = self.ground, self.turnStep, self.bound
 
 	local gravity = cfg.gravity
@@ -492,12 +606,28 @@ function CrowdSolver:substep(h)
 				dvz += driveX[b] / want * push
 			end
 
+			perch[b] = CrowdSolver.GROUND
+
 			-- Сцепление: лапы на опоре тянут скорость к желаемой; в воздухе только сопротивление.
 			local onGround = supported[b]
+			-- Слезает с крыши по разрешению: висит без опоры над полом — всё тело спускается
+			-- ровно со скоростью подъёма (вниз по стене), а не падает.
+			local lowering = false
+			if climbV[b] > 0 and not air[b] and not onGround then
+				for k = 1, nb do
+					local i = base + k
+					if py[i] > gb[i] + 0.05 then
+						lowering = true
+					end
+				end
+			end
 			for k = 1, nb do
 				local i = base + k
 				ox[i], oy[i], oz[i] = px[i], py[i], pz[i]
 				local x, y, z = vx[i], vy[i] - gravity * h, vz[i]
+				if lowering then
+					x, y, z = 0, -climbV[b], 0
+				end
 				if onGround then
 					x += (dvx - x) * grip
 					z += (dvz - z) * grip
@@ -505,10 +635,12 @@ function CrowdSolver:substep(h)
 					x -= x * drag
 					z -= z * drag
 				end
-				if climb[i] == 1 then
-					-- Подъём на спину соседа: точка, упёршаяся в него, тянется вверх.
-					if y < climbSpeed then
-						y = climbSpeed
+				local up = climb[i]
+				if up > 0 then
+					-- Подъём на спину соседа или на стену постройки: точка, упёршаяся в него,
+					-- тянется вверх со скоростью подъёма.
+					if y < up then
+						y = up
 					end
 					climb[i] = 0
 				end
@@ -516,7 +648,31 @@ function CrowdSolver:substep(h)
 				px[i] += x * h
 				py[i] += y * h
 				pz[i] += z * h
-				gr[i] = ground(px[i], pz[i]) + lift[i]
+				local base0 = ground(px[i], pz[i]) + lift[i]
+				gb[i] = base0
+				-- Кому разрешено лезть, тому крыша постройки под ступнями — пол.
+				local floor = base0
+				if climbV[b] > 0 and boxCount > 0 then
+					local feet = py[i] - lift[i]
+					local x0, z0 = px[i], pz[i]
+					local list = boxCells[(math.floor(x0 / cell) + 32768) * 65536 + math.floor(z0 / cell) + 32768]
+					if list then
+						-- Крыша держит точку, пока шар касается её края (на радиус касания со стеной):
+						-- у кромки ступни уже на её уровне — тело шагает наверх, а не срывается вниз.
+						local edge = r[i] - cfg.boxSlack + 0.05
+						local ceiling = base0 - lift[i] + climbTop[b]
+						for _, k in list do
+							local top = boxTop[k]
+							if top <= feet + cfg.stepUp and top <= ceiling + 1e-3
+								and x0 > boxMinX[k] - edge and x0 < boxMaxX[k] + edge
+								and z0 > boxMinZ[k] - edge and z0 < boxMaxZ[k] + edge
+								and top + lift[i] > floor then
+								floor = top + lift[i]
+							end
+						end
+					end
+				end
+				gr[i] = floor
 			end
 			supported[b] = false
 			pressing[b] = false
@@ -526,7 +682,6 @@ function CrowdSolver:substep(h)
 	end
 
 	-- 2. Пары точек, которые могут коснуться за этот подшаг: корзины cell x cell.
-	local cell = cfg.cell
 	local cells, nextIn = self.cells, self.cellNext
 	table.clear(cells)
 	for b = 1, count do
@@ -577,7 +732,6 @@ function CrowdSolver:substep(h)
 
 	-- 3. Связи, несколько проходов.
 	local stiff = cfg.spineStiffness
-	local maxSin = cfg.maxPitch
 	local limit = 1 - cfg.contactSlop
 	local aheadDot = cfg.aheadDot
 	local climbDelay, climbAbove = cfg.climbDelay, cfg.climbAbove
@@ -585,6 +739,10 @@ function CrowdSolver:substep(h)
 	local climbOnGround = cfg.climbOnGround
 	local maxLayers = cfg.maxLayers
 	local touching = 0
+	local boxSlack = cfg.boxSlack
+	local stepUp = cfg.stepUp
+	local boxPushMax = cfg.boxPushSpeed * h
+	local WALL, TOP, GROUND = CrowdSolver.WALL, CrowdSolver.TOP, CrowdSolver.GROUND
 	for pass = 1, cfg.iterations do
 		-- Хребет: точки тела стоят на одной прямой на своих местах. Поворот вокруг
 		-- вертикали задаёт ход (axis), наклон — сами точки (разная высота опоры).
@@ -606,7 +764,8 @@ function CrowdSolver:substep(h)
 				local dy = py[f] - py[t]
 				local len = math.sqrt(hl * hl + dy * dy)
 				local sinT = len > 1e-4 and dy / len or 0
-				sinT = math.clamp(sinT, -maxSin, maxSin)
+				local limitSin = pitchMax[b]
+				sinT = math.clamp(sinT, -limitSin, limitSin)
 				local cosT = math.sqrt(1 - sinT * sinT)
 				local ax, ay, az = axisX[b] * cosT, sinT, axisZ[b] * cosT
 				local mean = meanOff[b]
@@ -678,7 +837,7 @@ function CrowdSolver:substep(h)
 								local across = (-dvz * dx + dvx * dz) / want
 								dodge[bi] += if across > 0.05 then 1 elseif across < -0.05 then -1 else side[bi]
 								if stuck[bi] >= climbDelay and dy < H * climbAbove and py[j] - gr[j] < climbOnGround then
-									climb[i] = 1
+									climb[i] = climbSpeed
 								end
 							end
 							dvx, dvz = driveX[bj], driveZ[bj]
@@ -690,7 +849,97 @@ function CrowdSolver:substep(h)
 								local across = (dvz * dx - dvx * dz) / want
 								dodge[bj] += if across > 0.05 then 1 elseif across < -0.05 then -1 else side[bj]
 								if stuck[bj] >= climbDelay and -dy < H * climbAbove and py[i] - gr[i] < climbOnGround then
-									climb[j] = 1
+									climb[j] = climbSpeed
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+
+		-- Постройки и стены: каждая точка выталкивается сама, по своему радиусу. Постройка —
+		-- столб от пола до верха: кому лезть не разрешено, тому до неба (через неё не перелезть
+		-- ни сам, ни по чужим спинам); кому разрешено и летящему — до своего верха. Упёршийся
+		-- в неё по разрешению лезет вверх по стене со своей скоростью.
+		if boxCount > 0 or field then
+			for b = 1, count do
+				if not kin[b] then
+					local base = (b - 1) * STRIDE
+					local climber = climbV[b] > 0
+					local solidUp = not air[b] and not climber
+					local dvx, dvz = driveX[b], driveZ[b]
+					local want = math.sqrt(dvx * dvx + dvz * dvz)
+					for k = 1, n[b] do
+						local i = base + k
+						local R = r[i] - boxSlack
+						if boxCount > 0 then
+							local list = boxCells[(math.floor(px[i] / cell) + 32768) * 65536 + math.floor(pz[i] / cell) + 32768]
+							if list then
+								for _, q in list do
+									local top = boxTop[q]
+									-- Ступни уже у края крыши (ниже не больше stepUp) — стена не держит:
+									-- тело шагает на крышу, а пол под ним поднимается до её верха.
+									if bodyH[b] > boxGap[q] and (solidUp or py[i] - lift[i] < top - stepUp) then
+										local x, z = px[i], pz[i]
+										local minX, maxX, minZ, maxZ = boxMinX[q], boxMaxX[q], boxMinZ[q], boxMaxZ[q]
+										local dx = x - math.clamp(x, minX, maxX)
+										local dz = z - math.clamp(z, minZ, maxZ)
+										local d2 = dx * dx + dz * dz
+										local nx, nz, depth = 0, 0, 0
+										if d2 > 1e-8 then
+											if d2 < R * R then
+												local d = math.sqrt(d2)
+												nx, nz, depth = dx / d, dz / d, R - d
+											end
+										else
+											-- Точка внутри следа (постройку возвели на жука): наружу через
+											-- ближний край, не рывком.
+											local best = x - minX
+											nx, nz = -1, 0
+											if maxX - x < best then
+												best, nx, nz = maxX - x, 1, 0
+											end
+											if z - minZ < best then
+												best, nx, nz = z - minZ, 0, -1
+											end
+											if maxZ - z < best then
+												best, nx, nz = maxZ - z, 0, 1
+											end
+											depth = math.min(best + R, boxPushMax)
+										end
+										if depth > 0 then
+											px[i] += nx * depth
+											pz[i] += nz * depth
+											if climber and want > minDrive and (dvx * nx + dvz * nz) < -aheadDot * want
+												and top - (gb[i] - lift[i]) <= climbTop[b] + 1e-3 then
+												-- Лезет всем телом: лапы на стене держат его целиком, иначе
+												-- хребет оттаскивал бы упёршуюся голову от стены.
+												for kk = 1, n[b] do
+													climb[base + kk] = climbV[b]
+												end
+												perch[b] = WALL
+												supported[b] = true
+											end
+										end
+									end
+								end
+							end
+						end
+						if field then
+							local d = sampleField(field, px[i], pz[i])
+							if d and d < R then
+								local e = 0.5
+								local xp, xm = sampleField(field, px[i] + e, pz[i]), sampleField(field, px[i] - e, pz[i])
+								local zp, zm = sampleField(field, px[i], pz[i] + e), sampleField(field, px[i], pz[i] - e)
+								if xp and xm and zp and zm then
+									local gx, gz = xp - xm, zp - zm
+									local gl = math.sqrt(gx * gx + gz * gz)
+									if gl > 1e-5 then
+										local push = math.min(R - d, boxPushMax)
+										px[i] += gx / gl * push
+										pz[i] += gz / gl * push
+									end
 								end
 							end
 						end
@@ -711,7 +960,7 @@ function CrowdSolver:substep(h)
 					if py[i] < floor then
 						py[i] = floor
 						supported[b] = true
-					elseif not air[b] then
+					elseif not air[b] and climbV[b] <= 0 then
 						local top = floor + maxLayers * 2 * hs[i]
 						if py[i] > top then
 							py[i] = top
@@ -775,6 +1024,22 @@ function CrowdSolver:substep(h)
 					y = maxRise
 				elseif y < -maxFall then
 					y = -maxFall
+				end
+				-- С крыши по разрешению — не быстрее подъёма: так время перелезания совпадает
+				-- с ценой лазания в поиске пути (вверх и вниз по высоте).
+				local slow = climbV[b]
+				if slow > 0 and not air[b] then
+					if y < -slow then
+						y = -slow
+					end
+					-- Сошёл с крыши и висит над полом без опоры — слезает по стене вниз, а не
+					-- планирует вперёд: вбок не идёт, пока не встанет на пол.
+					if not supported[b] and py[i] > gb[i] + 0.05 then
+						x, z = 0, 0
+					end
+				end
+				if perch[b] == GROUND and gr[i] > gb[i] + 0.05 and py[i] <= gr[i] + 0.05 then
+					perch[b] = TOP
 				end
 				local speed = math.sqrt(x * x + z * z)
 				if speed > maxSpeed then

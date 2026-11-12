@@ -431,6 +431,211 @@ do
 	check(heavy < light, ("обычного сдвинули на %.2f, грызущего на %.2f"):format(light, heavy))
 end
 
+-- ============ Шаг 3: карта стен, постройки, лазание ============
+
+-- Карта расстояний до прямоугольных стен (как запекает Crowd, только точно).
+local function makeField(walls, x0, z0, x1, z1)
+	local w, hgt = x1 - x0 + 1, z1 - z0 + 1
+	local data = table.create(w * hgt, 0)
+	for row = 0, hgt - 1 do
+		for col = 0, w - 1 do
+			local x, z = x0 + col, z0 + row
+			local best = math.huge
+			for _, rect in walls do
+				local dx = math.max(rect.minX - x, 0, x - rect.maxX)
+				local dz = math.max(rect.minZ - z, 0, z - rect.maxZ)
+				local d
+				if dx == 0 and dz == 0 then
+					d = -math.min(x - rect.minX, rect.maxX - x, z - rect.minZ, rect.maxZ - z)
+				else
+					d = math.sqrt(dx * dx + dz * dz)
+				end
+				best = math.min(best, d)
+			end
+			data[row * w + col + 1] = best
+		end
+	end
+	return { x0 = x0, z0 = z0, w = w, h = hgt, cell = 1, data = data }
+end
+
+local function boxSolver()
+	return CrowdSolver.new(CFG, {
+		ground = function()
+			return 0
+		end,
+		turnStep = function(angle, dt)
+			return math.clamp(math.abs(angle) * 6, 2, 12) * dt
+		end,
+		bound = function(user, x, z)
+			return math.clamp(x, -30, 30), math.clamp(z, -40, 40)
+		end,
+	})
+end
+
+local function walkTo(solver, user, tx, tz, speed)
+	local x, _, z = solver:pivot(user.b)
+	local dx, dz = tx - x, tz - z
+	local len = math.sqrt(dx * dx + dz * dz)
+	if len < 0.2 then
+		solver:drive(user.b, 0, 0)
+	else
+		solver:drive(user.b, dx / len * speed, dz / len * speed, dx / len, dz / len)
+	end
+end
+
+print("10. Стены картой расстояний: толпа в дверь, точек в стене нет")
+do
+	local solver = boxSolver()
+	solver:setField(makeField(WALLS, -35, -45, 35, 45))
+	local users = {}
+	for row = 0, 5 do
+		for col = 0, 5 do
+			table.insert(users, spawn(solver, -10 + col * 4, -30 + row * 3.2))
+		end
+	end
+	local worst, passed = 0, 0
+	for frame = 1, 1800 do
+		for _, user in users do
+			steer(solver, user, 8)
+		end
+		solver:step(DT)
+		if frame % 10 == 0 then
+			for b = 1, solver.count do
+				local n, point = solver:points(b)
+				for k = 1, n do
+					local x, _, z = point(k)
+					local d = solver:wallDistance(x, z)
+					if d and d < 0 then
+						worst = math.max(worst, -d)
+					end
+				end
+			end
+		end
+	end
+	for _, user in users do
+		local _, _, z = solver:pivot(user.b)
+		if z > 1 then
+			passed += 1
+		end
+	end
+	check(worst == 0, ("глубже всего точка в стене: %.2f studs"):format(worst))
+	check(passed == #users, ("прошли дверь %d из %d"):format(passed, #users))
+end
+
+-- Постройка: квадрат 4 x 4 высотой 2 поперёк пути.
+local BOX = { minX = -2, maxX = 2, minZ = -2, maxZ = 2, top = 2, gap = 0 }
+
+print("11. Постройка: кто лезть не может, тот не входит и не встаёт сверху")
+do
+	local solver = boxSolver()
+	solver:setBoxes({ BOX })
+	local user = spawn(solver, 0, -10)
+	local inside, onTop = 0, 0
+	for _ = 1, 600 do
+		walkTo(solver, user, 0, 10, 8)
+		solver:step(DT)
+		local n, point = solver:points(user.b)
+		for k = 1, n do
+			local x, y, z = point(k)
+			if x > BOX.minX + 0.5 and x < BOX.maxX - 0.5 and z > BOX.minZ + 0.5 and z < BOX.maxZ - 0.5 then
+				inside += 1
+				if y - LIFT >= BOX.top - 0.1 then
+					onTop += 1
+				end
+			end
+		end
+	end
+	local _, _, z = solver:pivot(user.b)
+	check(inside == 0 and onTop == 0, ("точек в следе: %d, на крыше: %d; встал у стены z=%.1f"):format(inside, onTop, z))
+end
+
+print("12. Перелезание телом: по разрешению, время против расчёта поиска пути (план: 10%, здесь 20%)")
+for _, case in { { speed = 1.2, height = 2 }, { speed = 3, height = 2 }, { speed = 1, height = 4 } } do
+	local solver = boxSolver()
+	local box = table.clone(BOX)
+	box.top = case.height
+	solver:setBoxes({ box })
+	local user = spawn(solver, 0, -6)
+	solver:allowClimb(user.b, case.speed, case.height + 0.5)
+	local walk = 8
+	local t, startedAt, doneAt, maxFeet, wall = 0, nil, nil, 0, false
+	for _ = 1, 60 * 30 do
+		walkTo(solver, user, 0, 12, walk)
+		solver:step(DT)
+		t += DT
+		local x, y, z = solver:pivot(user.b)
+		maxFeet = math.max(maxFeet, y - LIFT)
+		if solver:perchOf(user.b) == CrowdSolver.WALL then
+			wall = true
+			startedAt = startedAt or t
+		end
+		if startedAt and not doneAt and z > box.maxZ + RADIUS and solver:perchOf(user.b) == CrowdSolver.GROUND
+			and y - LIFT < 0.05 then
+			doneAt = t
+		end
+	end
+	-- Расчёт как у перелезания по таймеру: вверх и вниз по высоте со скоростью подъёма,
+	-- поперёк крыши — шагом (ширина следа плюс длина тела).
+	local expected = 2 * case.height / case.speed + (box.maxZ - box.minZ + (FRONT - BACK)) / walk
+	local took = doneAt and startedAt and doneAt - startedAt
+	check(wall and took ~= nil and math.abs(took - expected) / expected <= 0.2 and maxFeet >= case.height - 0.1,
+		("скорость %.1f, высота %d: перелез за %.2f с, расчёт %.2f с, ступни поднимались до %.2f"):format(
+			case.speed, case.height, took or -1, expected, maxFeet))
+end
+
+print("13. По спинам через постройку не перелезть, если лезть нельзя")
+do
+	local solver = boxSolver()
+	local wallBox = { minX = -40, maxX = 40, minZ = -1, maxZ = 1, top = 1.6, gap = 0 }
+	solver:setBoxes({ wallBox })
+	local users = {}
+	for row = 0, 5 do
+		for col = 0, 7 do
+			table.insert(users, spawn(solver, -10 + col * 2.8, -16 + row * 2.8))
+		end
+	end
+	local crossed, onTop = 0, 0
+	for frame = 1, 1200 do
+		for _, user in users do
+			walkTo(solver, user, 0, 20, 8)
+		end
+		solver:step(DT)
+		if frame % 10 == 0 then
+			for b = 1, solver.count do
+				local n, point = solver:points(b)
+				for k = 1, n do
+					local x, y, z = point(k)
+					if z > wallBox.minZ + 0.3 and z < wallBox.maxZ - 0.3 then
+						onTop += 1
+					end
+				end
+			end
+		end
+	end
+	for _, user in users do
+		local _, _, z = solver:pivot(user.b)
+		if z > wallBox.maxZ then
+			crossed += 1
+		end
+	end
+	check(crossed == 0 and onTop == 0, ("перелезли: %d, точек над стеной: %d"):format(crossed, onTop))
+end
+
+print("14. Подлаз: тело ниже щели проходит под постройкой")
+do
+	local solver = boxSolver()
+	local low = table.clone(BOX)
+	low.gap = TOP + LIFT + 0.5
+	solver:setBoxes({ low })
+	local user = spawn(solver, 0, -10)
+	for _ = 1, 300 do
+		walkTo(solver, user, 0, 10, 8)
+		solver:step(DT)
+	end
+	local _, _, z = solver:pivot(user.b)
+	check(z > 9, ("прошёл под постройкой до z=%.1f"):format(z))
+end
+
 print(failures == 0 and "Всё прошло." or ("Провалов: %d"):format(failures))
 if failures > 0 then
 	error("crowd solver test failed")
