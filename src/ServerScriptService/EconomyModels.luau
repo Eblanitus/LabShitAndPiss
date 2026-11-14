@@ -1,6 +1,6 @@
 -- Модели хозяйственных построек экономики.
--- Биореактор (Завод Материи, по вики) — настоящая модель в BioreactorModel, дрон-носильщик —
--- колёсная колба CarrierRig, движение их деталей — клиент BioreactorVisuals. Станция носильщиков пока
+-- Дрон-носильщик — колёсная колба CarrierRig, движение его деталей — клиент CarrierVisuals.
+-- Биореактора больше нет: трупы перерабатывает бак алхимического стола (TableDigest). Станция носильщиков пока
 -- ВРЕМЕННАЯ ЗАГЛУШКА из примитивов; чтобы подключить настоящую, достаточно заменить функцию
 -- ниже (сигнатура та же).
 --
@@ -8,10 +8,9 @@
 -- в точке (0, 0, 0) модели; пивот ставится на TOWER_Y над полом, низ модели — на -1.6;
 -- след на полу — не шире Towers[тип].footprint (по умолчанию Grid.BuildSize = 4 studs).
 -- Логика смотрит только на атрибуты модели, которые ставит TowerBuilder/Carriers:
---   Type, HP, MaxHP, CellX, CellZ — как у любой постройки;
---   Processing (Биореактор) — сколько грузов сейчас перерабатывается (Bioreactor);
---   Carriers (Биореактор) — сколько всего носильщиков у реактора, Unreachable — сколько
---   трупов лежит без проезда (Carriers).
+--   Type, HP, MaxHP, CellX, CellZ — как у любой постройки.
+-- На модели стола (не постройки): Processing — сколько грузов в баке (TableDigest);
+--   Carriers — сколько всего носильщиков, Unreachable — сколько трупов лежит без проезда (Carriers).
 --
 -- Договор для дрона-носильщика: Model с PrimaryPart "Root", пивот — центр корпуса на полу
 -- (Carriers ставит его на высоту пола + Economy.carrierLift). Атрибуты, которые ведёт Carriers:
@@ -56,36 +55,6 @@ local function rootOf(model)
 	root.Parent = model
 	model.PrimaryPart = root
 	return root
-end
-
--- Биореактор: деталь корпуса одной строкой (те же правила, что у TowerModels.addPart).
-local function reactorPart(model, name, size, cframe, color, material, shape)
-	local p = Instance.new("Part")
-	p.Name = name
-	if shape then
-		p.Shape = shape
-	end
-	p.Size = size
-	p.CFrame = cframe
-	p.Color = color
-	p.Material = material
-	p.Anchored = true
-	p.CanCollide = false
-	p.TopSurface = Enum.SurfaceType.Smooth
-	p.BottomSurface = Enum.SurfaceType.Smooth
-	p.Parent = model
-	return p
-end
-
-local buildBioreactor = require(ServerScriptService:WaitForChild("BioreactorModel"))({
-	addPart = reactorPart,
-	addRoot = rootOf,
-})
-
--- Биореактор (Завод Материи): восьмиугольная платформа, приёмный конвейер, прижимной валец,
--- портал шредера, шнек, шламовый насос, экстракционная колонна (BioreactorModel).
-function EconomyModels.Bioreactor(towerData)
-	return buildBioreactor(towerData)
 end
 
 -- Станция носильщиков: низкий гараж с тремя док-площадками.

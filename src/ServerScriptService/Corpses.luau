@@ -10,7 +10,7 @@
 --   * группы столкновений Enemies/Corpses (их читает и клиент — группы реплицируются);
 --   * логические записи трупов { id, position, alive } — их ест Пеликан (EnemyBehavior);
 --   * ценность трупа в материи (экономика по вики: материя только из трупов) — её увозят
---     носильщики в Биореактор (Carriers, Bioreactor). Числа — ReplicatedStorage.Economy.
+--     носильщики в бак алхимического стола (Carriers, TableDigest). Числа — ReplicatedStorage.Economy.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
@@ -178,7 +178,7 @@ function Corpses.Leave(enemy, hit)
 		bornAt = os.clock(),
 		swampy = hit.swampy == true,
 		edible = edible,
-		-- Экономика: сколько материи выйдет из трупа в Биореакторе и сколько носильщиков
+		-- Экономика: сколько материи выйдет из трупа в баке стола и сколько носильщиков
 		-- нужно, чтобы его увезти. claimed — кто из носильщиков за ним уже едет (Carriers).
 		value = value,
 		integrity = integrity,
@@ -341,7 +341,7 @@ function Corpses.Valuable()
 end
 
 -- Труп подобран и увезён: записи больше нет, клиенты убирают тушу (или лежащие останки
--- без туши — по точке и радиусу). Возвращает материю, которую он даст в Биореакторе, или 0,
+-- без туши — по точке и радиусу). Возвращает материю, которую он даст в баке стола, или 0,
 -- если его уже нет (съел Пеликан, осыпался, лопнул, вытеснен по лимиту).
 function Corpses.Take(record)
 	if not record.alive then

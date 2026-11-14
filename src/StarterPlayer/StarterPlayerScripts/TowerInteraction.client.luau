@@ -514,7 +514,7 @@ local function rebuildCrossSlices(model, shape, thickness)
 	end
 end
 
--- Восьмиугольник (Биореактор, footprintShape.kind = "octagon"): квадрат side со срезанными
+-- Восьмиугольник (footprintShape.kind = "octagon"; стоял у Биореактора, сейчас ни у кого): квадрат side со срезанными
 -- на chamfer углами. Средняя плита, две полосы и четыре угла-клина без нахлёста. Грабли
 -- WedgePart — как у шестигранника выше: базис клина задаётся вручную.
 local function rebuildOctagonSlices(model, shape, thickness)
@@ -665,9 +665,8 @@ buildHintPad.Parent = buildHint
 -- из стройки. Сама турель цела и рабочая (Towers.Drill, модель и режим стрельбы на месте) —
 -- вернуть её игроку значит дописать "Drill" в эту строку, больше ничего не нужно.
 -- Пила (Saw, задача #436) — седьмая, на последней цифровой клавише.
--- Биореактор и Станция носильщиков (экономика) — последние: реактор стоит с начала забега
--- сам и строится заново, только если его снесли.
-local ALL_TOWERS_ORDER = { "Ballista", "Wall", "Mortar", "Injector", "Vaporizer", "Centrifuge", "Saw", "Bioreactor", "CarrierStation" }
+-- Станция носильщиков (экономика) — последняя. Биореактора нет: трупы перерабатывает стол.
+local ALL_TOWERS_ORDER = { "Ballista", "Wall", "Mortar", "Injector", "Vaporizer", "Centrifuge", "Saw", "CarrierStation" }
 local NUMBER_KEYS = {
 	Enum.KeyCode.One, Enum.KeyCode.Two, Enum.KeyCode.Three, Enum.KeyCode.Four,
 	Enum.KeyCode.Five, Enum.KeyCode.Six, Enum.KeyCode.Seven, Enum.KeyCode.Eight, Enum.KeyCode.Nine,
@@ -767,7 +766,7 @@ local function refreshBuildChoice()
 	-- с тем, что реально встанет на поле.
 	-- Форма зоны — по фактической платформе именно этой постройки: у большинства это
 	-- шестигранник по footprint, у Станции FPV-дронов — трапеция её платформы, у Пилы — крест,
-	-- у Биореактора — восьмиугольник (Towers[ключ].footprintShape). Занятость клеток от формы не зависит вовсе — след всегда
+	-- бывает и восьмиугольник (Towers[ключ].footprintShape). Занятость клеток от формы не зависит вовсе — след всегда
 	-- квадратный, по footprint (buildReach выше и Grid на сервере).
 	local footprint = data.footprint or Arena.buildSize
 	local shape = data.footprintShape

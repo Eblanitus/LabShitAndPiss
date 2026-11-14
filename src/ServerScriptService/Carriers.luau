@@ -1,18 +1,18 @@
--- Дроны-носильщики (по вики): наземные дроны на колёсах ездят от Биореактора к трупам и
--- обратно. Труп возят по частям: лапу тянет один дрон, тушу гиганта — только несколько
+-- Дроны-носильщики (по вики экономики v1.1): наземные дроны на колёсах ездят от алхимического
+-- стола к трупам и обратно и сбрасывают груз в бак под столешницей (TableDigest). Труп возят по частям: лапу тянет один дрон, тушу гиганта — только несколько
 -- вместе (Corpses: record.crew). Ездят по карте, поэтому глухой лабиринт отрезает доход:
 -- постройки для них непроходимы, путь ищется по сетке (Grid.GetOccupant).
 --
--- Сколько дронов: Towers.Bioreactor.carriers плюс Towers.CarrierStation.carriers за каждую
--- Станцию носильщиков на поле. Нет реактора — нет и дронов: Станции без него молчат.
+-- Сколько дронов: Economy.tableCarriers (свои у стола) плюс Towers.CarrierStation.carriers за
+-- каждую Станцию носильщиков на поле. Стол разбит — дронов нет: везти некуда.
 -- Числа движения — Economy (carrierSpeed и прочие).
 --
 -- Упрощения (в вики открыто или не про это): дроны неуязвимы, жуки их не задевают;
--- элемент в реакторе/станции дронов не меняет; путь считается от реактора в момент выезда
+-- элемент в станции дронов не меняет; путь считается от стола в момент выезда
 -- и на ходу не пересчитывается — новая постройка на пути его не остановит.
 --
 -- Точки подключения для модели и интерфейса: модель дрона — EconomyModels.Carrier
--- (атрибуты State, Loaded, Crew; деталь Cargo), папка Workspace.Carriers; на реакторе —
+-- (атрибуты State, Loaded, Crew; деталь Cargo), папка Workspace.Carriers; на модели стола —
 -- атрибуты Carriers (всего дронов) и Unreachable (трупов без проезда).
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -23,7 +23,9 @@ local Towers = require(ReplicatedStorage:WaitForChild("Towers"))
 local Economy = require(ReplicatedStorage:WaitForChild("Economy"))
 local Grid = require(ServerScriptService:WaitForChild("Grid"))
 local Corpses = require(ServerScriptService:WaitForChild("Corpses"))
-local Bioreactor = require(ServerScriptService:WaitForChild("Bioreactor"))
+local Arena = require(ReplicatedStorage:WaitForChild("Arena"))
+local LabTable = require(ServerScriptService:WaitForChild("LabTable"))
+local TableDigest = require(ServerScriptService:WaitForChild("TableDigest"))
 local EconomyModels = require(ServerScriptService:WaitForChild("EconomyModels"))
 
 local towersFolder = Workspace:WaitForChild("Towers")
@@ -37,14 +39,16 @@ end
 
 local Carriers = {}
 
-local reactor = nil -- модель Биореактора на поле (он один, Towers.Bioreactor.limit)
+-- Дом дронов — стол активной локации. Стол клеток сетки не занимает (LabTable), поэтому
+-- волна проезда спокойно стартует из его клетки.
+local home = nil
 local drones = {} -- { model, state, path, index, at, job, share, retire }
 local jobs = {} -- [record] = { record, members = {дроны}, arrived = число }
 
--- ===== Проезд: одна волна от реактора на всю сетку =====
+-- ===== Проезд: одна волна от стола на всю сетку =====
 --
 -- Дешевле, чем путь на каждый труп: занятость меняется редко (стройка, снос), а трупов
--- десятки. parent[клетка] — откуда в неё пришли от реактора; путь к трупу — цепочка родителей.
+-- десятки. parent[клетка] — откуда в неё пришли от стола; путь к трупу — цепочка родителей.
 local flood = nil -- { parent = {}, dist = {} } или nil — пересчитать
 local cols = Grid.Cols
 
@@ -57,8 +61,7 @@ local NEIGHBOURS = {
 	{ 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 },
 }
 
--- Дрон проезжает клетку, если в ней ничего не стоит — кроме самого реактора и Станций:
--- из них дроны и выезжают.
+-- Дрон проезжает клетку, если в ней ничего не стоит — кроме Станций: из них дроны и выезжают.
 local function passable(cx, cz)
 	if not Grid.InBounds(cx, cz) then
 		return false
@@ -67,14 +70,13 @@ local function passable(cx, cz)
 	if not occupant then
 		return true
 	end
-	local kind = occupant:GetAttribute("Type")
-	return occupant == reactor or kind == "CarrierStation"
+	return occupant:GetAttribute("Type") == "CarrierStation"
 end
 
 local function buildFlood()
 	cols = Grid.Cols
 	local parent, dist = {}, {}
-	local sx, sz = Grid.ToCell(reactor:GetPivot().Position)
+	local sx, sz = Grid.ToCell(home:GetPivot().Position)
 	local start = key(sx, sz)
 	dist[start] = 0
 	local queue, head = { { sx, sz } }, 1
@@ -99,7 +101,7 @@ local function buildFlood()
 end
 
 local function floodReady()
-	if not reactor or not reactor.Parent then
+	if not home or not home.Parent or not LabTable.IsAlive() then
 		return nil
 	end
 	if not flood or flood.cols ~= Grid.Cols then
@@ -135,7 +137,7 @@ local function reachableCell(position)
 	return nil
 end
 
--- Путь от реактора до клетки: точки в мире, спрямлённые по поворотам.
+-- Путь от стола до клетки: точки в мире, спрямлённые по поворотам.
 local function pathTo(targetKey)
 	local f = flood
 	local cells = {}
@@ -182,19 +184,30 @@ local function setLoaded(drone, loaded)
 	end
 end
 
+-- Круг стоянок вокруг стола: описан вокруг столешницы (полудиагональ габарита) с запасом,
+-- чтобы дрон не стоял в ножках. Габарит — Arena.tableHalf, пока не мерян — LabTable.REACH.
+local function homeRing()
+	local half = Arena.tableHalf or Vector3.zero
+	local radius = math.sqrt(half.X * half.X + half.Z * half.Z)
+	if radius <= 0 then
+		radius = LabTable.REACH
+	end
+	return radius + 1
+end
+
 local function homePoint(index)
-	local center = reactor:GetPivot().Position
+	local center = home:GetPivot().Position
 	local angle = index * 2.4
-	local ring = (Towers.Bioreactor.footprint or 4) / 2 + 1
+	local ring = homeRing()
 	local floor = Grid.ToWorld(Grid.ToCell(center))
 	return Vector3.new(center.X + math.cos(angle) * ring, floor.Y + Economy.carrierLift, center.Z + math.sin(angle) * ring)
 end
 
--- Объезд реактора по кругу стоянок: от стоянки до точки, где путь выходит из-под реактора,
--- прямая шла бы сквозь корпус Завода (след у него крупный). Точки — по дуге через ~30°.
+-- Объезд стола по кругу стоянок: от стоянки до точки, где путь выходит из-под стола,
+-- прямая шла бы сквозь ножки и бак. Точки — по дуге через ~30°.
 local function ringDetour(route, from, to)
-	local center = reactor:GetPivot().Position
-	local ring = (Towers.Bioreactor.footprint or 4) / 2 + 1
+	local center = home:GetPivot().Position
+	local ring = homeRing()
 	local a0 = math.atan2(from.Z - center.Z, from.X - center.X)
 	local a1 = math.atan2(to.Z - center.Z, to.X - center.X)
 	local turn = (a1 - a0 + math.pi) % (2 * math.pi) - math.pi
@@ -244,7 +257,7 @@ end
 
 -- Дрон разворачивается домой по тому же пути (без груза — задание сорвалось).
 local function sendBack(drone, loaded)
-	-- Пройденные точки в обратном порядке, последняя — точка стоянки у реактора.
+	-- Пройденные точки в обратном порядке, последняя — точка стоянки у стола.
 	local back = {}
 	for i = math.min(drone.index - 1, #drone.path), 1, -1 do
 		table.insert(back, drone.path[i])
@@ -258,10 +271,10 @@ local function sendBack(drone, loaded)
 end
 
 local function wanted()
-	if not reactor or not reactor.Parent then
+	if not home or not home.Parent or not LabTable.IsAlive() then
 		return 0
 	end
-	local count = Towers.Bioreactor.carriers or 0
+	local count = Economy.tableCarriers or 0
 	local perStation = Towers.CarrierStation and Towers.CarrierStation.carriers or 0
 	for _, tower in towersFolder:GetChildren() do
 		if tower:GetAttribute("Type") == "CarrierStation" and (tower:GetAttribute("HP") or 0) > 0 then
@@ -271,7 +284,7 @@ local function wanted()
 	return count
 end
 
--- Число дронов под реактор и Станции: новых — сразу, лишних — по мере возвращения.
+-- Число дронов под стол и Станции: новых — сразу, лишних — по мере возвращения.
 local function syncCount()
 	local need = wanted()
 	local active = 0
@@ -297,8 +310,8 @@ local function syncCount()
 			end
 		end
 	end
-	if reactor and reactor.Parent then
-		reactor:SetAttribute("Carriers", need)
+	if home and home.Parent then
+		home:SetAttribute("Carriers", need)
 	end
 end
 
@@ -309,27 +322,19 @@ local function dropAll()
 	table.clear(jobs)
 end
 
-local function adoptReactor(model)
-	if reactor == model then
+-- Стол сменился (другая локация): дроны прежнего стола пропадают, новые выедут от нового.
+local function adoptTable(model)
+	if home == model then
 		return
 	end
 	dropAll()
-	reactor = model
+	home = model
 	flood = nil
-	model.Destroying:Once(function()
-		if reactor == model then
-			reactor = nil
-			dropAll() -- реактор снесли: дроны и всё, что они везли, пропадают
-		end
-	end)
 	syncCount()
 end
 
 towersFolder.ChildAdded:Connect(function(child)
-	local kind = child:GetAttribute("Type")
-	if kind == "Bioreactor" then
-		adoptReactor(child)
-	elseif kind == "CarrierStation" then
+	if child:GetAttribute("Type") == "CarrierStation" then
 		syncCount()
 	end
 end)
@@ -372,8 +377,8 @@ local function assign()
 			end
 		end
 	end
-	if reactor then
-		reactor:SetAttribute("Unreachable", unreachable)
+	if home then
+		home:SetAttribute("Unreachable", unreachable)
 	end
 	if #free == 0 then
 		return
@@ -392,10 +397,10 @@ local function assign()
 				local drone = table.remove(free)
 				drone.job = job
 				-- Из точки стоянки — к первой точке пути и дальше.
-				-- Точки под самим реактором пропускаются: дрон выезжает со своей стоянки рядом.
+				-- Точки под самим столом пропускаются: дрон выезжает со своей стоянки рядом.
 				local route = { drone.at }
-				local center = reactor:GetPivot().Position
-				local inside = (Towers.Bioreactor.footprint or 4) / 2 + 0.5
+				local center = home:GetPivot().Position
+				local inside = homeRing() - 0.5
 				for _, point in path do
 					local flat = (point - center) * Vector3.new(1, 0, 1)
 					if #route > 1 or flat.Magnitude > inside then
@@ -459,8 +464,9 @@ local function arrive(drone)
 		drone.share = nil
 		setLoaded(drone, false)
 		drone.model:SetAttribute("Crew", nil)
-		if share > 0 and reactor and reactor.Parent then
-			Bioreactor.Process(reactor, share)
+		-- Груз — в бак под столешницей. Стол разбит, пока ехали, — груз пропадает.
+		if share > 0 then
+			TableDigest.Process(share)
 		end
 		if drone.retire then
 			removeDrone(drone)
@@ -525,20 +531,27 @@ end)
 task.spawn(function()
 	while true do
 		task.wait(Economy.assignInterval)
-		local ok, err = pcall(assign)
+		-- Число дронов сверяется заодно с раздачей: стол разбили, починили новым забегом,
+		-- Станцию разгрызли — без отдельных подписок на каждое из этого.
+		local ok, err = pcall(function()
+			syncCount()
+			assign()
+		end)
 		if not ok then
 			warn("[Носильщики] " .. tostring(err))
 		end
 	end
 end)
 
--- Новый забег: дроны и задания прежнего уходят вместе с ним (реактор сносит WaveRunner,
--- стартовый ставит TowerBootstrap — его подхватит ChildAdded).
+-- Новый забег: дроны и задания прежнего уходят вместе с ним; свои дроны стола выедут заново
+-- на следующей раздаче, когда WaveRunner починит стол (LabTable.Reset).
 function Carriers.Reset()
 	dropAll()
-	reactor = nil
 	flood = nil
 end
+
+adoptTable(LabTable.Model())
+LabTable.OnChanged(adoptTable)
 
 -- Для проверок: сколько дронов и сколько из них в деле.
 function Carriers.Stats()

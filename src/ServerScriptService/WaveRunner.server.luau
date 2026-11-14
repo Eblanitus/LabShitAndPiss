@@ -24,7 +24,7 @@ local Grid = require(ServerScriptService:WaitForChild("Grid"))
 local Crowd = require(ServerScriptService:WaitForChild("Crowd"))
 local Corpses = require(ServerScriptService:WaitForChild("Corpses"))
 -- Переработка трупов в материю (экономика по вики): сбрасывается вместе с забегом.
-local Bioreactor = require(ServerScriptService:WaitForChild("Bioreactor"))
+local TableDigest = require(ServerScriptService:WaitForChild("TableDigest"))
 local Carriers = require(ServerScriptService:WaitForChild("Carriers"))
 local WaveState = require(ServerScriptService:WaitForChild("WaveState"))
 local Plutonium = require(ServerScriptService:WaitForChild("Plutonium"))
@@ -283,7 +283,7 @@ local function clearArena()
 	-- Трупы и кровь живут до конца ЗАБЕГА: поле зарастает останками
 	-- всю его длину и чистится ровно здесь, вместе со всей остальной ареной.
 	Corpses.Clear()
-	Bioreactor.Reset()
+	TableDigest.Reset()
 	Carriers.Reset()
 
 	-- Стены, пандусы, кормушки, окопы, коконы и хитин. Именно здесь снимается хитин
@@ -520,7 +520,6 @@ local function startRun(levelNumber)
 	-- После Tutorial.Start: у обучения свой стартовый запас материи.
 	Matter.Reset(Tutorial.StartMatter())
 	TowerBootstrap.PlaceStartingTower()
-	TowerBootstrap.PlaceStartingReactor()
 
 	for _, player in Players:GetPlayers() do
 		teleportToArena(player)

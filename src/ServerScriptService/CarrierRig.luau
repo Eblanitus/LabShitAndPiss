@@ -1,9 +1,9 @@
--- Модель дрона-носильщика Биореактора: колба с биомассой на низком шасси, ездит на четырёх колёсах.
+-- Модель дрона-носильщика алхимического стола: колба с биомассой на низком шасси, ездит на четырёх колёсах.
 -- Подключена в EconomyModels.Carrier; ездит по тому же пути, по которому раньше ездил ровер.
 --
 -- Root анкорнут, остальное приварено к нему. Что должно двигаться само, висит на Motor6D:
 -- колёса — «WheelJoint» (крутятся по пройденному пути), крышка колбы — «BinHinge» (откидывается,
--- когда груз сдан). Это ведёт клиент (BioreactorVisuals), меняя C0 у себя.
+-- когда груз сдан). Это ведёт клиент (CarrierVisuals), меняя C0 у себя.
 --
 -- Договор EconomyModels: пивот — центр корпуса на полу, Carriers ставит его на высоту пола + Economy.carrierLift.
 -- Перед — -Z (LookVector). Деталь Cargo — биомасса на дне колбы и прямой ребёнок модели: Carriers
@@ -18,7 +18,7 @@ local dark = Color3.fromRGB(46, 49, 55)
 local mid = Color3.fromRGB(70, 75, 83)
 local light = Color3.fromRGB(98, 104, 114)
 local black = Color3.fromRGB(24, 25, 28)
-local GLOW = Color3.fromRGB(80, 235, 175) -- акцент Биореактора: дрон — его изделие
+local GLOW = Color3.fromRGB(80, 235, 175) -- зелёный биомассы: дрон возит её в бак стола
 local GLASS = Color3.fromRGB(150, 200, 230)
 local CARGO = Color3.fromRGB(96, 78, 58)
 local metal, plastic, neon = Enum.Material.Metal, Enum.Material.SmoothPlastic, Enum.Material.Neon

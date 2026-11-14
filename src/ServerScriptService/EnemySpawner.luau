@@ -1674,7 +1674,7 @@ local function spawnEnemy(enemyType, offset, hpOverride, startPosition, setup)
 			-- Погибший очищенный — потеря игрока, а не его добыча: ни плутония, ни строки
 			-- в журнале убийств, и труп ничего не стоит (ниже, Corpses.Leave).
 			-- Само убийство материи не даёт (экономика по вики): материя выходит из трупа,
-			-- когда носильщики довезут его до Биореактора (Corpses, Carriers).
+			-- когда носильщики довезут его до бака стола (Corpses, Carriers).
 			if not enemy:GetAttribute("Ally") then
 				Plutonium.AwardEnemyKill(enemyType)
 				ProfileStats.Kill(enemyType, enemy:GetAttribute("LastElement"))
