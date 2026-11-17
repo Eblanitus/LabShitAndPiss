@@ -23,7 +23,8 @@
   (`tools/carrier/build_carrier.py`), палитра и роль цвета по имени детали — `tools/carrier/palette.py`,
   превью — `tools/carrier/render_preview.py` → `preview_compare.png`. В игру ещё не подключён (сейчас `CarrierRig`).
 - `Модели/Turrets/` — образцы стиля: Колба в трёх уровнях детализации (`colba_l0..l2.glb`, превью
-  `colba_style_preview.png`), строит `tools/turret_style/colba_lods.py`, правила — `docs/model_style_guide.md`.
+  `colba_style_preview.png`), строит `tools/turret_style/colba_lods.py` из авторского `Модели/Turrets/source/colba2.blend`
+  (копия `Documents\КОЛБа 2.blend` с ПК автора), правила — `docs/model_style_guide.md`.
   В игру не подключены.
 - `Звуки/` — звуки игры (.ogg). Черновой набор собирает `tools/synth_sounds.py`, в Roblox их грузит
   `tools/upload_sounds.py` (нужен `ROBLOX_API_KEY`) и сам пишет id в `src/ReplicatedStorage/SoundIds.luau`.

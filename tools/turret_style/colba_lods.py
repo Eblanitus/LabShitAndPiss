@@ -5,17 +5,16 @@
 Пишет colba_l0.glb, colba_l1.glb, colba_l2.glb. В игру не подключены — это образцы для выбора
 уровня детализации (docs/model_style_guide.md).
 
-  L0 — «как сейчас»: раскладка, размеры и цвета деталей сняты с ServerStorage.ColbaTurretTemplate
-       (place/game.rbxl). Сами меши лежат на серверах Roblox, в облачной сессии их не скачать,
-       поэтому каждая деталь — её габарит простой формой (призма, цилиндр, дуга). Силуэт и
-       число деталей те же, грани примерно как у меша из Blender без фасок.
-  L1 — +1 ступенька: фаски на всех рёбрах, круглое — 20-24 грани, швы панелей, болты на фланцах,
-       решётки, отверстие ствола, шланг от колбы к казённику.
-  L2 — +2: слоистая броня с зазорами, двойные фаски, гидроцилиндр подъёма, рёбра охлаждения,
-       скобы на шлангах, клетка колбы с раскосами, мелочь на казённике.
+  L0 — как в игре: авторская модель Модели/Turrets/source/colba2.blend (копия «КОЛБа 2.blend»)
+       без того, чего нет в ServerStorage.ColbaTurretTemplate (воронка FlaskFiller, болты
+       DetailBolts_Merged, провода Wire_Struts), цвета деталей — как в шаблоне, плюс жидкость.
+  L1 — +1 ступенька поверх неё: цоколь тумбы, решётки и неоновые щели на гранях, неоновое кольцо
+       стола и крышки колбы, болты, отверстие ствола, решётка и штуцеры казённика, фаски на острых
+       брусках; возвращены авторские болты и провода. Катушки, трубки, провода облегчены вдвое.
+  L2 — +2: бронеплиты тумбы, втулки и раскосы клетки колбы, хомуты катушек, рёбра охлаждения,
+       гидроцилиндр подъёма, манометр, болты на N-панелях.
 
-Оси Blender: X — вперёд по стволу, Z — вверх, 1 единица = 1 стад, низ подошвы z = -1.6
-(как TOWER_Y у турелей). Имена деталей латиницей, роль цвета — по материалу:
+Оси как в .blend: пол z = 0, ствол смотрит в -X, 1 единица = 1 стад. Роль цвета — по материалу:
 Steel_Dark / Steel_Mid / Steel_Light / Plastic_Black / Panel_Light / Accent (неон, игра красит
 в цвет элемента) / Glass / Liquid (тоже красится).
 """
@@ -265,293 +264,217 @@ AXIS = {
 }
 
 # --------------------------------------------------------------------------- Колба
-# Числа — из шаблона (смещения от RootPart, стады). Roblox (dx, dy, dz) -> Blender (dx, -dz, dy).
-FLASK = Vector((0.75, 2.25, 0))  # центр модуля колбы по XY
-GUN_Y = -1.5                     # ось ствола сбоку от центра
-GUN_Z = 4.6                      # высота оси ствола (наклон 8° у шаблона снят)
+# Основа — авторская модель (Модели/Turrets/source/colba2.blend, копия «КОЛБа 2.blend»).
+# Оси .blend: пол z = 0, ствол смотрит в -X и опущен на 8°, колба слева (-Y), ствол справа (+Y).
+SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Модели", "Turrets", "source", "colba2.blend")
+
+# В игре (ServerStorage.ColbaTurretTemplate) этих деталей .blend нет: воронку убрали (#67),
+# болты и провода в FBX не попали.
+NOT_IN_GAME = ("FlaskFiller", "DetailBolts_Merged", "Wire_Struts")
+
+# Цвет детали — как в шаблоне игры (place/game.rbxl), по началу имени.
+ROLE = [
+    ("Колба.005", "Steel_Mid"), ("Колба", "Glass"),
+    ("OctoBase", "Steel_Dark"), ("Turntable", "Steel_Dark"),
+    ("ArmBasePlate", "Steel_Mid"), ("ArmHydLower", "Steel_Light"),
+    ("FlaskCap", "Steel_Light"), ("FlaskCollar", "Steel_Mid"), ("FlaskRing", "Steel_Light"),
+    ("FlaskRib", "Steel_Dark"), ("Strut", "Steel_Light"),
+    ("Breech", "Steel_Dark"), ("Leg", "Steel_Dark"),
+    ("DetailIndicator", "Accent"), ("NPlateL_Strip", "Accent"), ("NPlateR_Strip", "Accent"),
+    ("LiquidTube", "Accent"), ("Coil", "Accent"), ("Vent", "Accent"),
+    ("NPlate", "Steel_Mid"), ("NRib", "Steel_Mid"),
+    ("Barrel", "Steel_Dark"), ("MiniBarrel", "Steel_Dark"), ("MuzzleRing", "Steel_Dark"),
+    ("SideCover", "Steel_Mid"), ("SideShield", "Steel_Mid"), ("Rail", "Steel_Light"),
+    ("DetailBolts", "Steel_Light"), ("Wire", "Plastic_Black"),
+]
+
+BASE_C = Vector((0.02, -0.05, 0))     # центр тумбы
+OCTO_R = 5.10                         # тумба: до грани, z 0..1.6
+TT_R, TT_Z = 4.5, 1.9                 # поворотный стол r 4.5, z 1.6..2.2
+FLASK = Vector((-0.58, -2.30, 0))     # ось колбы
+GUN_Y = 1.45
+PITCH = math.atan2(0.93, 6.59)        # ствол поднимается к казённику (+X)
+COIL0 = Vector((-4.22, GUN_Y, 5.70))  # центр первой катушки, на оси ствола
+AXIS_DIR = Vector((math.cos(PITCH), 0, math.sin(PITCH)))
 
 
-def octo(r_flat):
-    return r_flat / math.cos(math.pi / 8)
+def role_of(name):
+    return next((r for p, r in ROLE if name.startswith(p)), "Steel_Dark")
 
 
-def build_base(b):
+def load_source(b, keep_extra):
+    """Авторская модель в коллекцию b.col: модификаторы применены, трансформы запечены, цвета игры."""
+    with bpy.data.libraries.load(SOURCE) as (src, dst):
+        dst.objects = [n for n in src.objects]
+    dg = None
+    tmp = bpy.data.collections.new("src")
+    bpy.context.scene.collection.children.link(tmp)
+    for o in dst.objects:
+        if o is not None:
+            tmp.objects.link(o)
+    dg = bpy.context.evaluated_depsgraph_get()
+    for o in list(tmp.objects):
+        if o.type not in ("MESH", "CURVE"):
+            continue
+        if o.name.startswith(NOT_IN_GAME) and not keep_extra:
+            continue
+        me = bpy.data.meshes.new_from_object(o.evaluated_get(dg))
+        me.transform(o.matrix_world)
+        role = role_of(o.name)
+        me.materials.clear()
+        me.materials.append(b.mats[role])
+        for p in me.polygons:
+            p.material_index = 0
+        name = "Flask" if o.name == "Колба" else "BarrelBody" if o.name == "Колба.005" else o.name
+        no = bpy.data.objects.new(name, me)
+        b.col.objects.link(no)
+    for o in list(tmp.objects):
+        bpy.data.objects.remove(o)
+    bpy.data.collections.remove(tmp)
+    # Жидкость: копия колбы 80% по ширине и 88% по высоте, как Liquid в шаблоне
+    flask = b.col.objects["Flask"]
+    me = flask.data.copy()
+    c = FLASK + Vector((0, 0, 3.93))
+    me.transform(Matrix.Translation(c) @ Matrix.Diagonal((0.8, 0.8, 0.88, 1)) @ Matrix.Translation(-c))
+    me.materials.clear()
+    me.materials.append(b.mats["Liquid"])
+    b.col.objects.link(bpy.data.objects.new("Liquid", me))
+
+
+def gun_m(t, extra=Matrix()):
+    """Матрица на оси ствола: t — расстояние вдоль оси от первой катушки, местная Z — вдоль ствола."""
+    p = COIL0 + AXIS_DIR * t
+    return Matrix.Translation(p) @ Matrix.Rotation(-PITCH, 4, "Y") @ AXIS["X"] @ extra
+
+
+def bevel_existing(b, names, width):
+    """Фаска на авторских деталях без неё (бруски с острыми рёбрами)."""
+    for o in b.col.objects:
+        if o.name.startswith(names) and not o.modifiers:
+            mod = o.modifiers.new("Bevel", "BEVEL")
+            mod.width = width
+            mod.segments = 1
+            mod.limit_method = "ANGLE"
+            mod.angle_limit = math.radians(35)
+
+
+def lighten(b, names, ratio):
+    """Треугольники с мелочи: катушки, трубки, индикаторы у автора гуще, чем видно в игре."""
+    for o in b.col.objects:
+        if o.name.startswith(names):
+            mod = o.modifiers.new("Decimate", "DECIMATE")
+            mod.ratio = ratio
+
+
+def detail_l1(b):
     lv = b.lv
-    # Восьмигранная тумба 10.2 по граням, низ -1.6, верх 0
-    if lv.n == 0:
-        b.prism("OctoBase", b.ngon(8, octo(5.105), math.pi / 8), 1.6, "Steel_Dark", Matrix.Translation((0.15, 0, -1.6)))
-    else:
-        # цоколь чуть шире, корпус, скос сверху — три яруса вместо одного бруска
-        b.prism("OctoPlinth", b.ngon(8, octo(5.2), math.pi / 8), 0.35, "Steel_Mid", Matrix.Translation((0.15, 0, -1.6)))
-        b.prism("OctoBase", b.ngon(8, octo(5.0), math.pi / 8), 1.05, "Steel_Dark", Matrix.Translation((0.15, 0, -1.25)))
-        b.prism("OctoTop", b.ngon(8, octo(4.75), math.pi / 8), 0.2, "Steel_Mid", Matrix.Translation((0.15, 0, -0.2)))
-        for k in range(8):
-            a = 2 * math.pi * k / 8
-            rot = Matrix.Rotation(a, 4, "Z")
-            c = Vector((0.15, 0, 0))
-            if k % 2 == 0:
-                # решётка вентиляции на четырёх гранях: чёрная ниша + планки
-                b.box("Grille", (0.12, 2.6, 0.62), c + rot @ Vector((4.98, 0, -0.72)), "Plastic_Black", rot, bevel=0)
-                slats = 4 if lv.n == 1 else 6
-                for s in range(slats):
-                    y = -1.1 + 2.2 * s / (slats - 1)
-                    b.box("GrilleSlat", (0.1, 0.14, 0.56), c + rot @ Vector((5.0, y, -0.72)), "Steel_Light", rot, bevel=0)
-            else:
-                # неоновая щель-индикатор на диагональных гранях
-                b.box("Glow_Base", (0.08, 1.4, 0.12), c + rot @ Vector((5.02, 0, -0.55)), "Accent", rot, bevel=0)
-            if lv.n >= 2:
-                # накладные бронепластины с зазором и болтами по углам
-                b.box("SkirtPlate", (0.14, 3.2, 0.3), c + rot @ Vector((5.08, 0, -1.25)), "Steel_Mid", rot)
-                for y in (-1.45, 1.45):
-                    b.bolt("Bolt", c + rot @ Vector((5.17, y, -1.25)), axis="X", r=0.08)
-    # Поворотный стол 9.0, 0.6
-    if lv.n == 0:
-        b.cyl("Turntable", 4.5, 0.6, (0.15, 0, 0.3), "Steel_Dark")
-    else:
-        b.cyl("Turntable", 4.5, 0.42, (0.15, 0, 0.21), "Steel_Dark", seg=None)
-        b.cyl("TurntableTop", 4.2, 0.18, (0.15, 0, 0.51), "Steel_Mid", seg=None)
-        b.ring("Glow_Turntable", 4.53, 4.38, 0.06, (0.15, 0, 0.3), "Accent", seg=None, bevel=0)
-        nb = 8 if lv.n == 1 else 16
-        for k in range(nb):
-            a = 2 * math.pi * (k + 0.5) / nb
-            b.bolt("Bolt", (0.15 + 3.95 * math.cos(a), 3.95 * math.sin(a), 0.63))
-
-
-FLASK_PROFILE = [(0, 0.13), (1.1, 0.13), (1.36, 0.45), (1.38, 1.9), (1.3, 3.2), (0.95, 3.85),
-                 (0.62, 4.15), (0.6, 4.53), (0, 4.53)]
-
-
-def build_flask(b):
-    lv = b.lv
-    fx, fy = FLASK.x, FLASK.y
-    # Колба (стекло) и жидкость: профиль бутыли с горлом
-    prof = FLASK_PROFILE if lv.n > 0 else [(0, 0.13), (1.3, 0.13), (1.375, 0.6), (1.375, 3.3), (0.75, 4.1), (0.6, 4.53), (0, 4.53)]
-    b.lathe("Flask", prof, (fx, fy, 0), "Glass", bevel=0)
-    liq = [(r * 0.8, 0.25 + (z - 0.13) * 0.62) for r, z in prof[:5]] + [(0, 0.25 + (prof[4][1] - 0.13) * 0.62)]
-    b.lathe("Liquid", liq, (fx, fy, 0), "Liquid", bevel=0)
-    # Воротник снизу и крышка сверху
-    b.cyl("FlaskCollar", 1.72, 0.6, (fx, fy, 0.38), "Steel_Mid")
-    b.cyl("FlaskCap", 1.775, 0.41, (fx, fy, 4.44), "Steel_Light")
-    if lv.n >= 1:
-        b.cyl("FlaskCapHub", 0.8, 0.22, (fx, fy, 4.75), "Steel_Mid")
-        b.ring("Glow_Cap", 1.1, 0.95, 0.05, (fx, fy, 4.66), "Accent", bevel=0)
-    if lv.n >= 2:
-        for k in range(6):
-            a = 2 * math.pi * k / 6
-            b.bolt("Bolt", (fx + 1.5 * math.cos(a), fy + 1.5 * math.sin(a), 0.7))
-    if lv.n >= 2:
-        for k in range(4):  # вентиляционные прорези в крышке
-            a = 2 * math.pi * k / 4 + math.pi / 4
-            b.box("CapSlot", (0.5, 0.12, 0.06), (fx + 1.3 * math.cos(a), fy + 1.3 * math.sin(a), 4.65), "Plastic_Black",
-                  Matrix.Rotation(a, 4, "Z"), bevel=0)
-    # Обручи
-    for z, h in ((1.10, 0.35), (2.33, 0.30), (3.57, 0.35)):
-        if lv.n == 0:
-            b.cyl("FlaskRing", 1.46, h, (fx, fy, z), "Steel_Light")
+    # --- тумба: цоколь шире корпуса, решётки на прямых гранях, неоновые щели на косых
+    b.prism("OctoPlinth", b.ngon(8, (OCTO_R + 0.14) / math.cos(math.pi / 8), math.pi / 8), 0.3, "Steel_Mid",
+            Matrix.Translation(BASE_C - Vector((0, 0, 0.0))))
+    for k in range(8):
+        a = 2 * math.pi * k / 8
+        rot = Matrix.Rotation(a, 4, "Z")
+        if k % 2 == 0:
+            b.box("Grille", (0.1, 2.6, 0.6), BASE_C + rot @ Vector((OCTO_R + 0.02, 0, 0.95)), "Plastic_Black", rot)
+            slats = 4 if lv.n == 1 else 6
+            for s in range(slats):
+                y = -1.1 + 2.2 * s / (slats - 1)
+                b.box("GrilleSlat", (0.1, 0.14, 0.54), BASE_C + rot @ Vector((OCTO_R + 0.05, y, 0.95)), "Steel_Light", rot,
+                      bevel=0)
         else:
-            r_in = 1.39 if z < 3 else 1.31
-            b.ring("FlaskRing", 1.5, r_in, h, (fx, fy, z), "Steel_Light")
-    # Рёбра клетки (тонкие) и стойки (толстые)
-    for sx, sy in ((1, 1), (1, -1), (-1, -1), (-1, 1)):
-        if lv.n == 0:
-            b.box("FlaskRib", (0.28, 0.28, 2.64), (fx + 0.97 * sx, fy + 0.97 * sy, 2.33), "Steel_Dark")
-        else:
-            b.cyl("FlaskRib", 0.14, 2.64, (fx + 0.99 * sx, fy + 0.99 * sy, 2.33), "Steel_Dark")
-        if lv.n < 2:
-            b.box("Strut", (0.66, 0.66, 3.79), (fx + 1.08 * sx * 1.4, fy + 1.08 * sy * 1.4, 2.49), "Steel_Light",
-                  Matrix.Rotation(math.pi / 4, 4, "Z"))
-        else:
-            # стойка: швеллер + втулки
-            p = Vector((fx + 1.51 * sx, fy + 1.51 * sy, 0))
-            rot = Matrix.Rotation(math.pi / 4, 4, "Z")
-            b.box("Strut", (0.5, 0.5, 3.79), p + Vector((0, 0, 2.49)), "Steel_Light", rot)
-            b.box("StrutInset", (0.54, 0.2, 2.6), p + Vector((0, 0, 2.49)), "Steel_Dark", rot, bevel=0.03)
-            for z in (0.95, 4.05):
-                b.box("StrutSleeve", (0.62, 0.62, 0.26), p + Vector((0, 0, z)), "Steel_Mid", rot)
-    if lv.n >= 2:
-        # раскосы клетки между стойками
-        for k in range(4):
-            a0 = math.pi / 4 + k * math.pi / 2
-            a1 = a0 + math.pi / 2
-            p0 = Vector((fx + 1.62 * math.cos(a0), fy + 1.62 * math.sin(a0), 1.2))
-            p1 = Vector((fx + 1.62 * math.cos(a1), fy + 1.62 * math.sin(a1), 3.5))
-            mid = (p0 + p1) / 2
-            d = p1 - p0
-            rot = d.to_track_quat("Z", "Y").to_matrix().to_4x4()
-            o = b.cyl("Brace", 0.06, d.length, (0, 0, 0), "Steel_Mid", seg=6, bevel=0)
-            o.matrix_world = Matrix.Translation(mid) @ rot
-
-
-def build_arm(b):
-    lv = b.lv
-    y = GUN_Y
-    # Опорная плита
-    b.box("ArmBasePlate", (4.24, 2.64, 0.3), (0.31, y, 0.75), "Steel_Mid")
-    # Лебединая шея: дуги от плиты назад-вверх к казённику (центр дуги над плитой)
-    c = (1.71, 5.45)
-    if lv.n == 0:
-        b.arc_band("LegRib", c, 6.29, 5.6, 200, 265, y - 1.2, y - 0.8, "Steel_Dark")
-        b.arc_band("LegRib", c, 6.29, 5.6, 200, 265, y + 0.8, y + 1.2, "Steel_Dark")
-        b.arc_band("ArmHyd", c, 5.6, 4.6, 205, 262, y - 0.8, y + 0.8, "Steel_Light")
-    else:
-        b.arc_band("LegRib", c, 6.3, 5.55, 200, 265, y - 1.22, y - 0.82, "Steel_Dark")
-        b.arc_band("LegRib", c, 6.3, 5.55, 200, 265, y + 0.82, y + 1.22, "Steel_Dark")
-        b.arc_band("ArmHyd", c, 5.6, 4.75, 205, 262, y - 0.78, y + 0.78, "Steel_Mid")
-        b.arc_band("ArmCore", c, 5.45, 4.9, 207, 260, y - 0.84, y + 0.84, "Plastic_Black", bevel=0)
-        # пятки дуг на плите
-        b.box("ArmFoot", (1.3, 2.7, 0.4), (1.5, y, 1.05), "Steel_Dark")
-        for dx in (-0.4, 0.4):
-            for dy in (-1.05, 1.05):
-                b.bolt("Bolt", (1.5 + dx, y + dy, 1.28))
-    if lv.n >= 2:
-        # гидроцилиндр подъёма: корпус от плиты, шток к стволу
-        p0 = Vector((2.0, y, 1.0))
-        p1 = Vector((3.4, y, GUN_Z - 0.95))
-        d = p1 - p0
-        rot = d.to_track_quat("Z", "Y").to_matrix().to_4x4()
-        for name, r, t0, t1, mat in (("HydBody", 0.3, 0.0, 0.6, "Steel_Light"), ("HydRod", 0.14, 0.55, 1.0, "Panel_Light")):
-            mid = p0 + d * ((t0 + t1) / 2)
-            o = b.cyl(name, r, d.length * (t1 - t0), (0, 0, 0), mat)
-            o.matrix_world = Matrix.Translation(mid) @ rot
-        for p in (p0, p1):
-            b.cyl("HydEye", 0.24, 0.5, p, "Steel_Mid", axis="Y")
-
-
-def build_gun(b):
-    lv = b.lv
-    y, z = GUN_Y, GUN_Z
-    # --- казённик
-    if lv.n == 0:
-        b.box("Breech", (3.4, 2.6, 2.8), (-5.59, y, z), "Steel_Dark")
-        b.box("BreechExtension", (4.81, 2.24, 2.68), (-3.91, y, z), "Steel_Dark")
-    else:
-        b.box("Breech", (3.4, 2.5, 2.7), (-5.59, y, z), "Steel_Dark")
-        b.box("BreechExtension", (4.6, 2.2, 2.5), (-3.91, y, z), "Steel_Dark")
-        b.box("BreechTop", (2.9, 1.9, 0.18), (-5.59, y, z + 1.4), "Steel_Mid")  # верхняя крышка-панель
-        b.box("BreechSeam", (0.08, 2.54, 2.4), (-4.3, y, z), "Plastic_Black", bevel=0)  # шов панелей
-    if lv.n >= 2:
-        # бронеплиты по бокам слоем поверх корпуса + решётка сзади + манометр
-        for s in (-1, 1):
-            b.box("BreechArmor", (1.6, 0.16, 1.2), (-3.4, y + s * 1.18, z - 0.55), "Steel_Mid")
-            for dx in (-0.6, 0.6):
-                b.bolt("Bolt", (-3.4 + dx, y + s * 1.27, z - 0.12), axis="Y", r=0.07)
-        b.cyl("Gauge", 0.32, 0.12, (-4.6, y + 1.32, z + 0.75), "Steel_Light", axis="Y")
-        b.cyl("GaugeFace", 0.24, 0.04, (-4.6, y + 1.39, z + 0.75), "Panel_Light", axis="Y", bevel=0)
-        b.box("GaugeNeedle", (0.03, 0.02, 0.2), (-4.6, y + 1.42, z + 0.8), "Accent", bevel=0)
-    # N-панели по бокам казённика, полоса и индикаторы (акцент)
-    for s in (-1, 1):
-        b.box("NPlate", (2.6, 0.18, 2.0), (-5.59, y + s * 1.39, z), "Steel_Mid")
-        b.box("Glow_NStrip", (2.2, 0.08, 0.15), (-5.59, y + s * 1.49, z), "Accent", bevel=0)
-        for dz in (0.3, -0.3):
-            b.box("Glow_Indicator", (0.35, 0.06, 0.18), (-6.11 + (0.9 if lv.n else 0), y + s * 1.5, z + dz + (0.35 if lv.n else 0)),
-                  "Accent", bevel=0)
-        if lv.n >= 2:
-            for dx in (-1.1, 1.1):
-                for dz in (-0.8, 0.8):
-                    b.bolt("Bolt", (-5.59 + dx, y + s * 1.49, z + dz), axis="Y", r=0.07)
-    # задняя решётка
-    for k, dy in enumerate((-0.8, 0, 0.8)):
-        if lv.n == 0:
-            b.box("NRib", (0.4, 0.4, 2.2), (-7.42, y + dy, z), "Steel_Mid")
-        else:
-            b.box("NRib", (0.34, 0.3, 2.2), (-7.36, y + dy, z), "Steel_Mid")
-    if lv.n >= 1:
-        b.box("BackGrille", (0.1, 2.1, 2.1), (-7.3, y, z), "Plastic_Black", bevel=0)
-    # трубки жидкости дугой над казёнником (акцент)
+            b.box("Glow_Base", (0.08, 1.4, 0.12), BASE_C + rot @ Vector((OCTO_R + 0.03, 0, 1.1)), "Accent", rot)
+    # --- поворотный стол: неоновое кольцо по кромке и болты
+    b.ring("Glow_Turntable", TT_R + 0.03, TT_R - 0.1, 0.07, BASE_C + Vector((0, 0, TT_Z)), "Accent")
+    nb = 8 if lv.n == 1 else 16
+    for k in range(nb):
+        a = 2 * math.pi * (k + 0.5) / nb
+        p = BASE_C + Vector((4.05 * math.cos(a), 4.05 * math.sin(a), 2.24))
+        if (p - FLASK).to_2d().length > 2.0:
+            b.bolt("Bolt", p)
+    # --- колба: ступица и неоновое кольцо на крышке
+    b.cyl("FlaskCapHub", 0.75, 0.2, FLASK + Vector((0, 0, 6.35)), "Steel_Mid")
+    b.ring("Glow_Cap", 1.15, 0.98, 0.04, FLASK + Vector((0, 0, 6.27)), "Accent")
+    # --- казённик: чёрная решётка между задними рёбрами, штуцеры трубок
+    b.box("BackGrille", (0.06, 2.3, 2.0), (7.44, GUN_Y, 7.1), "Plastic_Black")
     for dy in (-0.8, 0, 0.8):
-        pts = [(-7.1, y + dy, z + 1.2), (-6.8, y + dy, z + 2.0), (-5.6, y + dy, z + 2.1), (-4.4, y + dy, z + 2.0), (-4.05, y + dy, z + 1.2)]
-        if lv.n == 0:
-            pts = [pts[0], (-6.6, y + dy, z + 2.05), (-4.6, y + dy, z + 2.05), pts[-1]]
-        b.tube("LiquidTube", pts, 0.22 if lv.n else 0.25, "Accent", seg=(6, 8, 10)[lv.n])
-        if lv.n >= 1:
-            for x in (-7.1, -4.05):
-                b.cyl("TubeFitting", 0.3, 0.22, (x, y + dy, z + 1.33), "Steel_Light")
-    # крышки казённика
-    for s in (-1, 1):
-        b.box("BreechCover", (3.2, 0.28, 1.4), (-4.19, y + s * 1.14, z + 0.59 if lv.n == 0 else z + 0.55), "Steel_Dark")
+        for x in (4.45, 7.05):
+            b.cyl("TubeFitting", 0.3, 0.14, (x, GUN_Y + dy, 8.56), "Steel_Light", bevel=0)
+    # --- ствол: тёмное отверстие в дульном кольце
+    o = b.cyl("MuzzleBore", 0.42, 0.2, (0, 0, 0), "Plastic_Black")
+    o.matrix_world = gun_m(-1.68)  # торец дульного кольца
+    # фаски на острых авторских брусках, мелочь легче
+    bevel_existing(b, ("Strut", "FlaskRib", "BarrelTop", "BarrelBottom", "Rail", "SideCover", "SideShield",
+                       "MiniBarrel", "LegRightRib_Cap"), 0.05)
+    lighten(b, ("Coil",), 0.5)
+    lighten(b, ("LiquidTube",), 0.5)
+    lighten(b, ("Wire",), 0.4)
 
-    # --- рельсовый ствол
-    xc = 1.83
-    for dz in (0.57, -0.57):
-        b.cyl("Barrel", 0.63, 8.27, (xc, y, z + dz), "Steel_Dark", axis="X")
-    for s in (-1, 1):
-        b.box("Rail", (8.35, 0.14, 1.92), (1.75, y + s * 0.7, z), "Steel_Light")
-    # гильзы
-    if lv.n == 0:
-        b.prism("Sleeve", b.ngon(8, 1.42, math.pi / 8), 3.52, "Steel_Dark",
-                Matrix.Translation((-2.31 - 1.76, y, z)) @ AXIS["X"])
-        b.prism("Sleeve", b.ngon(8, 1.2, math.pi / 8), 2.78, "Steel_Dark",
-                Matrix.Translation((0.29 - 1.39, y, z)) @ AXIS["X"])
-    else:
-        b.lathe("Sleeve", [(0, 0), (1.3, 0), (1.45, 0.25), (1.45, 3.27), (1.3, 3.52), (0, 3.52)],
-                (-2.31 - 1.76, y, z), "Steel_Dark", axis="X")
-        b.lathe("Sleeve", [(0, 0), (1.1, 0), (1.22, 0.2), (1.22, 2.58), (1.1, 2.78), (0, 2.78)],
-                (0.29 - 1.39, y, z), "Steel_Dark", axis="X")
-    if lv.n >= 2:
-        # рёбра охлаждения на большой гильзе
-        for k in range(5):
-            b.ring("CoolingFin", 1.62, 1.4, 0.1, (-3.6 + 0.6 * k, y, z), "Steel_Mid", axis="X", bevel=0)
-    # катушки (акцент)
+
+def detail_l2(b):
+    # --- тумба: бронеплиты с болтами на прямых гранях
+    for k in range(0, 8, 2):
+        a = 2 * math.pi * k / 8
+        rot = Matrix.Rotation(a, 4, "Z")
+        b.box("SkirtPlate", (0.14, 3.4, 0.36), BASE_C + rot @ Vector((OCTO_R + 0.07, 0, 0.42)), "Steel_Mid", rot)
+        for y in (-1.5, 1.5):
+            b.bolt("Bolt", BASE_C + rot @ Vector((OCTO_R + 0.15, y, 0.42)), axis="X", r=0.08)
+    # --- колба: втулки на стойках, раскосы клетки, болты на воротнике
+    for sx, sy in ((1, 1), (1, -1), (-1, -1), (-1, 1)):
+        p = FLASK + Vector((1.08 * sx, 1.08 * sy, 0))
+        for z in (2.45, 5.7):
+            b.box("StrutSleeve", (0.78, 0.78, 0.24), p + Vector((0, 0, z)), "Steel_Mid")
+    for k in range(4):
+        a0 = math.pi / 4 + k * math.pi / 2
+        a1 = a0 + math.pi / 2
+        r = 1.53
+        p0 = FLASK + Vector((r * math.cos(a0), r * math.sin(a0), 2.9))
+        p1 = FLASK + Vector((r * math.cos(a1), r * math.sin(a1), 4.9))
+        d = p1 - p0
+        o = b.cyl("Brace", 0.05, d.length, (0, 0, 0), "Steel_Mid", seg=6, bevel=0)
+        o.matrix_world = Matrix.Translation((p0 + p1) / 2) @ d.to_track_quat("Z", "Y").to_matrix().to_4x4()
     for k in range(6):
-        x = -2.21 + 1.32 * k
-        if lv.n == 0:
-            b.cyl("Coil", 0.985, 0.71, (x, y, z), "Accent", axis="X")
-        else:
-            b.ring("Coil", 0.99, 0.72, 0.62, (x, y, z), "Accent", axis="X")
-            if lv.n >= 2:
-                b.ring("CoilClamp", 1.06, 0.95, 0.14, (x - 0.38, y, z), "Steel_Light", axis="X", bevel=0)
-    # дульный узел
-    if lv.n == 0:
-        b.cyl("MuzzleRing", 1.16, 1.67, (5.28, y, z), "Steel_Dark", axis="X")
-    else:
-        b.ring("MuzzleRing", 1.16, 0.55, 1.67, (5.28, y, z), "Steel_Dark", axis="X")
-        b.cyl("MuzzleBore", 0.56, 1.5, (5.3, y, z), "Plastic_Black", axis="X", bevel=0)
-    for s in (-1, 1):
-        b.box("SideShield", (2.94, 0.28, 0.92), (5.91, y + s * 0.56, z - 1.16), "Steel_Mid")
-        b.box("SideCover", (2.53, 0.21, 0.73), (5.2, y + s * 0.89, z - 0.83), "Steel_Mid")
-    for name, dy, dz in (("MiniBarrel", 0, 0.64), ("MiniBarrel", -0.82, -0.3), ("MiniBarrel", 0.82, -0.3)):
-        if lv.n == 0:
-            b.box(name, (2.14, 0.33, 0.51), (6.48, y + dy, z + dz), "Steel_Dark")
-        else:
-            b.ring(name, 0.22, 0.12, 2.14, (6.48, y + dy, z + dz), "Steel_Dark", axis="X")
-    for k in range(3):
-        b.box("Glow_Vent", (0.61, 0.29, 0.2) if lv.n == 0 else (0.5, 0.26, 0.06), (5.71 + 0.565 * k, y, z + 0.95),
-              "Accent", bevel=0)
-    if lv.n >= 1:
-        b.box("VentPlate", (2.0, 0.6, 0.12), (6.28, y, z + 0.88), "Plastic_Black", bevel=0)
-
-
-def build_hoses(b):
-    lv = b.lv
-    if lv.n == 0:
-        return
-    fx, fy = FLASK.x, FLASK.y
-    y, z = GUN_Y, GUN_Z
-    # шланг подачи: из воротника колбы к казённику
-    pts = [(fx - 1.2, fy - 1.0, 0.55), (fx - 2.6, fy - 1.8, 0.9), (-4.2, y + 1.4, 1.6), (-5.2, y + 1.3, z - 1.6),
-           (-5.6, y + 1.2, z - 1.25)]
-    b.tube("Hose", pts, 0.16, "Plastic_Black")
-    if lv.n >= 2:
-        pts2 = [(fx - 0.6, fy - 1.4, 0.55), (fx - 1.6, fy - 2.6, 0.85), (-3.0, y + 1.5, 1.2), (-4.6, y + 1.3, z - 1.8),
-                (-5.0, y + 1.2, z - 1.25)]
-        b.tube("Hose", pts2, 0.12, "Plastic_Black")
-        for p in ((fx - 2.6, fy - 1.8, 0.9), (-4.2, y + 1.4, 1.6)):
-            b.ring("HoseClamp", 0.24, 0.15, 0.14, p, "Steel_Light", axis="Y", bevel=0)
+        a = 2 * math.pi * k / 6
+        b.bolt("Bolt", FLASK + Vector((1.5 * math.cos(a), 1.5 * math.sin(a), 2.3)))
+    # --- ствол: хомуты на катушках, рёбра охлаждения за последней катушкой
+    for k in range(6):
+        o = b.ring("CoilClamp", 1.07, 0.95, 0.12, (0, 0, 0), "Steel_Light", bevel=0)
+        o.matrix_world = gun_m(1.334 * k - 0.4)
+    for k in range(4):
+        o = b.ring("CoolingFin", 1.62, 1.3, 0.09, (0, 0, 0), "Steel_Mid", bevel=0)
+        o.matrix_world = gun_m(7.15 + 0.38 * k)
+    # --- гидроцилиндр подъёма: от опорной плиты к стволу под второй катушкой
+    p0 = Vector((-1.7, GUN_Y, 2.55))
+    p1 = COIL0 + AXIS_DIR * 1.6 - Vector((0, 0, 1.05))
+    d = p1 - p0
+    rot = d.to_track_quat("Z", "Y").to_matrix().to_4x4()
+    for name, r, t0, t1, mat in (("HydBody", 0.26, 0.0, 0.58, "Steel_Light"), ("HydRod", 0.12, 0.5, 1.0, "Panel_Light")):
+        o = b.cyl(name, r, d.length * (t1 - t0), (0, 0, 0), mat)
+        o.matrix_world = Matrix.Translation(p0 + d * ((t0 + t1) / 2)) @ rot
+    for p in (p0, p1):
+        b.cyl("HydEye", 0.22, 0.5, p, "Steel_Mid", axis="Y")
+    # --- казённик: манометр на боку, болты на N-панелях
+    b.cyl("Gauge", 0.3, 0.12, (3.3, 2.62, 7.75), "Steel_Light", axis="Y")
+    b.cyl("GaugeFace", 0.23, 0.04, (3.3, 2.69, 7.75), "Panel_Light", axis="Y", bevel=0)
+    b.box("GaugeNeedle", (0.03, 0.02, 0.18), (3.3, 2.72, 7.8), "Accent")
+    for y in (2.96, -0.06):
+        for dx in (-1.1, 1.1):
+            for dz in (-0.8, 0.8):
+                b.bolt("Bolt", (5.76 + dx, y, 7.1 + dz), axis="Y", r=0.07)
 
 
 def build(n, mats):
     lv = Lv(n)
     b = Builder(lv, mats)
-    build_base(b)
-    build_flask(b)
-    build_arm(b)
-    build_gun(b)
-    build_hoses(b)
+    load_source(b, keep_extra=n >= 1)  # с L1 возвращаются авторские болты и провода из .blend
+    if n >= 1:
+        detail_l1(b)
+    if n >= 2:
+        detail_l2(b)
     return b.col
 
 
 def bake(col, n):
-    """Модификаторы в меш и затенение: L0 — плоские грани, L1/L2 — гладкие с острыми углами > 35°."""
+    """Модификаторы в меш; затенение: гладко, жёсткие рёбра > 35° (у авторских деталей — как в .blend)."""
     dg = bpy.context.evaluated_depsgraph_get()
     tris = 0
     for o in list(col.objects):
@@ -560,10 +483,10 @@ def bake(col, n):
             o.modifiers.clear()
             o.data = me
         me = o.data
-        if n == 0:
-            for p in me.polygons:
-                p.use_smooth = False
-        else:
+        if o.matrix_world != Matrix():
+            me.transform(o.matrix_world)
+            o.matrix_world = Matrix()
+        if not any(p.use_smooth for p in me.polygons) or n >= 1:
             me.shade_smooth()
             me.set_sharp_from_angle(angle=math.radians(35))
         tris += sum(len(p.vertices) - 2 for p in me.polygons)
