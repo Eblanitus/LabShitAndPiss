@@ -8,11 +8,10 @@
   L0 — как в игре: авторская модель Модели/Turrets/source/colba2.blend (копия «КОЛБа 2.blend»)
        без того, чего нет в ServerStorage.ColbaTurretTemplate (воронка FlaskFiller, болты
        DetailBolts_Merged, провода Wire_Struts), цвета деталей — как в шаблоне, плюс жидкость.
-  L1 — +1 ступенька поверх неё: цоколь тумбы, решётки и неоновые щели на гранях, неоновое кольцо
-       стола и крышки колбы, болты, отверстие ствола, решётка и штуцеры казённика, фаски на острых
-       брусках; возвращены авторские болты и провода. Катушки, трубки, провода облегчены вдвое.
-  L2 — +2: бронеплиты тумбы, втулки и раскосы клетки колбы, хомуты катушек, рёбра охлаждения,
-       гидроцилиндр подъёма, манометр, болты на N-панелях.
+  L1 — +1 ступенька формой: тумба со скосом и наклонными стенками, бутыль в литой чаше с тремя
+       лапами и куполом, А-стойка с гидроцилиндром, гранёный казённик, восьмигранный кожух ствола
+       с раструбом и дульным тормозом. Катушки, трубки, N-панели, рёбра, мини-стволы — авторские.
+  L2 — +2: контрфорсы тумбы, бронещитки казённика, корона колбы, перемычка стойки, хребет ствола.
 
 Оси как в .blend: пол z = 0, ствол смотрит в -X, 1 единица = 1 стад. Роль цвета — по материалу:
 Steel_Dark / Steel_Mid / Steel_Light / Plastic_Black / Panel_Light / Accent (неон, игра красит
@@ -302,7 +301,7 @@ def role_of(name):
     return next((r for p, r in ROLE if name.startswith(p)), "Steel_Dark")
 
 
-def load_source(b, keep_extra):
+def load_source(b, skip=()):
     """Авторская модель в коллекцию b.col: модификаторы применены, трансформы запечены, цвета игры."""
     with bpy.data.libraries.load(SOURCE) as (src, dst):
         dst.objects = [n for n in src.objects]
@@ -316,7 +315,7 @@ def load_source(b, keep_extra):
     for o in list(tmp.objects):
         if o.type not in ("MESH", "CURVE"):
             continue
-        if o.name.startswith(NOT_IN_GAME) and not keep_extra:
+        if o.name.startswith(NOT_IN_GAME + tuple(skip)):
             continue
         me = bpy.data.meshes.new_from_object(o.evaluated_get(dg))
         me.transform(o.matrix_world)
@@ -332,7 +331,9 @@ def load_source(b, keep_extra):
         bpy.data.objects.remove(o)
     bpy.data.collections.remove(tmp)
     # Жидкость: копия колбы 80% по ширине и 88% по высоте, как Liquid в шаблоне
-    flask = b.col.objects["Flask"]
+    flask = b.col.objects.get("Flask")
+    if flask is None:
+        return
     me = flask.data.copy()
     c = FLASK + Vector((0, 0, 3.93))
     me.transform(Matrix.Translation(c) @ Matrix.Diagonal((0.8, 0.8, 0.88, 1)) @ Matrix.Translation(-c))
@@ -347,125 +348,208 @@ def gun_m(t, extra=Matrix()):
     return Matrix.Translation(p) @ Matrix.Rotation(-PITCH, 4, "Y") @ AXIS["X"] @ extra
 
 
-def bevel_existing(b, names, width):
-    """Фаска на авторских деталях без неё (бруски с острыми рёбрами)."""
-    for o in b.col.objects:
-        if o.name.startswith(names) and not o.modifiers:
-            mod = o.modifiers.new("Bevel", "BEVEL")
-            mod.width = width
-            mod.segments = 1
-            mod.limit_method = "ANGLE"
-            mod.angle_limit = math.radians(35)
+# Детали, которые L1 заменяет своими формами. Остаются: катушки, трубки жидкости, N-панели с полосой
+# и индикаторами, задние рёбра, мини-стволы, опорная плита — то, по чему Колбу узнают.
+REPLACED = ("OctoBase", "Turntable", "Колба", "FlaskCap", "FlaskCollar", "FlaskRing", "FlaskRib", "Strut",
+            "Leg", "ArmHydLower", "BreechNew", "BreechExtension", "Barrel", "Rail", "MuzzleRing", "SideCover",
+            "SideShield", "Vent")
 
 
-def lighten(b, names, ratio):
-    """Треугольники с мелочи: катушки, трубки, индикаторы у автора гуще, чем видно в игре."""
-    for o in b.col.objects:
-        if o.name.startswith(names):
-            mod = o.modifiers.new("Decimate", "DECIMATE")
-            mod.ratio = ratio
+def loft(b, name, rings, mat, caps=True):
+    """Тело по сечениям: rings — списки точек (Vector) одинаковой длины, по порядку вдоль тела."""
+    n = len(rings[0])
+    verts = [v for r in rings for v in r]
+    faces = []
+    for k in range(len(rings) - 1):
+        a0, a1 = k * n, (k + 1) * n
+        faces += [[a0 + i, a0 + (i + 1) % n, a1 + (i + 1) % n, a1 + i] for i in range(n)]
+    if caps:
+        faces.append(list(range(n))[::-1])
+        faces.append(list(range((len(rings) - 1) * n, len(rings) * n)))
+    return b.obj(name, verts, faces, mat, bevel=0)
+
+
+def chamf(w, h, ct, cb):
+    """Прямоугольник w x h с фасками: сверху ct, снизу cb (точки (u, v) против часовой)."""
+    return [(-w / 2 + cb, -h / 2), (w / 2 - cb, -h / 2), (w / 2, -h / 2 + cb), (w / 2, h / 2 - ct),
+            (w / 2 - ct, h / 2), (-w / 2 + ct, h / 2), (-w / 2, h / 2 - ct), (-w / 2, -h / 2 + cb)]
+
+
+def octo_poly(r_flat):
+    R = r_flat / math.cos(math.pi / 8)
+    return [(R * math.cos(math.pi / 8 + i * math.pi / 4), R * math.sin(math.pi / 8 + i * math.pi / 4)) for i in range(8)]
+
+
+def circle(r, n):
+    return [(r * math.cos(2 * math.pi * i / n), r * math.sin(2 * math.pi * i / n)) for i in range(n)]
+
+
+def ring_z(c, poly, z, k=1.0):
+    return [Vector((c.x + u * k, c.y + v * k, z)) for u, v in poly]
+
+
+def ring_x(x, y0, z0, poly, k=1.0):
+    return [Vector((x, y0 + u * k, z0 + v * k)) for u, v in poly]
+
+
+SIDE = Vector((0, 1, 0))
+UP = Vector((-math.sin(PITCH), 0, math.cos(PITCH)))
+
+
+def gun_pt(t, u, v):
+    return COIL0 + AXIS_DIR * t + SIDE * u + UP * v
+
+
+def ring_gun(t, poly, k=1.0):
+    return [gun_pt(t, u * k, v * k) for u, v in poly]
+
+
+def lathe_z(b, name, c, prof, mat, seg=32):
+    """Тело вращения вокруг вертикали через c: prof — [(r, z)]."""
+    return loft(b, name, [ring_z(c, circle(max(r, 1e-4), seg), z) for r, z in prof], mat)
+
+
+def sweep_arm(b, name, c, ang, path, w, th, mat):
+    """Лапа опоры колбы: брусок w x th по кривой path [(r, z)] в вертикальной плоскости под углом ang."""
+    er = Vector((math.cos(ang), math.sin(ang), 0))
+    et = Vector((-math.sin(ang), math.cos(ang), 0))
+    rings = []
+    for i, (r, z) in enumerate(path):
+        r0, z0 = path[max(0, i - 1)]
+        r1, z1 = path[min(len(path) - 1, i + 1)]
+        L = math.hypot(r1 - r0, z1 - z0)
+        nr, nz = (z1 - z0) / L, -(r1 - r0) / L  # нормаль наружу
+        base = c + er * r + Vector((0, 0, z))
+        nvec = er * nr + Vector((0, 0, nz))
+        rings.append([base + nvec * (dn * th / 2) + et * (dt * w / 2) for dn, dt in ((-1, -1), (1, -1), (1, 1), (-1, 1))])
+    return loft(b, name, rings, mat)
+
+
+def plate_xz(b, name, poly, y0, y1, mat):
+    """Пластина: многоугольник в плоскости XZ, толщина по Y от y0 до y1."""
+    return loft(b, name, [[Vector((x, y, z)) for x, z in poly] for y in (y0, y1)], mat)
+
+
+def slot_gun(b, name, t, u, v, dt, du, dv, mat):
+    """Брусок на стволе: центр (t, u, v), размеры вдоль ствола dt, вбок du, вверх dv."""
+    q = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+    rings = [[gun_pt(t + a * dt / 2, u + s * du / 2, v + c * dv / 2) for a, c in q] for s in (-1, 1)]
+    return loft(b, name, rings, mat)
+
+
+def form_base(b):
+    # тумба: цоколь, скос, наклонные стенки к столу — вместо прямой восьмигранной плиты
+    secs = [(5.3, 0.0), (5.3, 0.22), (5.12, 0.4), (4.9, 1.32), (4.7, 1.6)]
+    loft(b, "Base", [ring_z(BASE_C, octo_poly(r), z) for r, z in secs], "Steel_Dark")
+    # стол: барабан со скошенными кромками и приподнятый центр
+    secs = [(4.3, 1.6), (4.6, 1.74), (4.6, 1.98), (4.32, 2.2)]
+    loft(b, "Turntable", [ring_z(BASE_C, circle(r, 48), z) for r, z in secs], "Steel_Mid")
+    lathe_z(b, "TurntableHub", BASE_C, [(0, 2.18), (3.35, 2.18), (3.35, 2.26), (3.15, 2.34), (0, 2.34)],
+            "Steel_Dark", seg=40)
+
+
+def form_flask(b):
+    # стекло — бутыль с плечами и горлом, жидкость повторяет форму
+    lathe_z(b, "Flask", FLASK, [(0, 1.78), (1.05, 1.78), (1.3, 1.95), (1.4, 2.3), (1.4, 4.5), (1.25, 5.0),
+                                (0.85, 5.42), (0.62, 5.6), (0.6, 6.05), (0, 6.05)], "Glass")
+    lathe_z(b, "Liquid", FLASK, [(0, 1.86), (1.0, 1.86), (1.22, 2.0), (1.31, 2.3), (1.31, 4.55), (0, 4.55)],
+            "Liquid", seg=28)
+    # литая чаша снизу, купол-крышка сверху
+    lathe_z(b, "FlaskSocket", FLASK, [(0, 1.68), (1.98, 1.68), (1.98, 1.9), (1.66, 2.42), (1.36, 2.46), (0, 2.46)],
+            "Steel_Mid")
+    lathe_z(b, "FlaskCap", FLASK, [(0, 5.82), (1.22, 5.82), (1.22, 5.96), (0.98, 6.26), (0.6, 6.42), (0, 6.42)],
+            "Steel_Light")
+    # три изогнутые лапы по контуру бутыли от чаши к крышке и пояс на плечах
+    for k in range(3):
+        a = math.radians(50 + 120 * k)
+        sweep_arm(b, "FlaskArm", FLASK, a, [(1.85, 2.0), (1.62, 2.5), (1.55, 3.0), (1.55, 4.4), (1.42, 5.05),
+                                            (1.2, 5.88)], 0.66, 0.3, "Steel_Light")
+    b.ring("FlaskBand", 1.66, 1.42, 0.2, FLASK + Vector((0, 0, 4.48)), "Steel_Mid", seg=32, bevel=0)
+
+
+ARM_POLY = [(-1.9, 2.5), (1.9, 2.5), (5.4, 5.75), (5.4, 6.3), (3.5, 6.3), (-0.5, 3.25)]
+ARM_INNER = [(-0.9, 2.75), (1.4, 2.75), (4.5, 5.65), (3.6, 5.95), (-0.2, 3.25)]
+
+
+def form_arm(b):
+    # А-стойка: две фигурные щеки с утопленной панелью и гидроцилиндр между ними
+    for y0, y1, face, d in ((0.25, 0.65, 0.25, -0.04), (2.25, 2.65, 2.65, 0.04)):
+        plate_xz(b, "ArmCheek", ARM_POLY, y0, y1, "Steel_Dark")
+        plate_xz(b, "ArmCheekPanel", ARM_INNER, face, face + d, "Steel_Mid")
+    p0 = Vector((0.0, GUN_Y, 2.6))
+    p1 = Vector((3.7, GUN_Y, 5.7))
+    d = p1 - p0
+    rot = d.to_track_quat("Z", "Y").to_matrix().to_4x4()
+    for name, r, t0, t1, mat in (("HydBody", 0.34, 0.0, 0.6, "Steel_Light"), ("HydRod", 0.15, 0.55, 1.0, "Panel_Light")):
+        o = b.cyl(name, r, d.length * (t1 - t0), (0, 0, 0), mat, seg=20, bevel=0)
+        o.matrix_world = Matrix.Translation(p0 + d * ((t0 + t1) / 2)) @ rot
+    b.cyl("HydEye", 0.3, 1.9, p0 + Vector((0, 0, 0.05)), "Steel_Mid", axis="Y", seg=20, bevel=0)
+
+
+def form_breech(b):
+    # казённик: гранёный блок с крупными скосами сверху, сужается назад; перед — тоньше, к стволу
+    prof = chamf(2.6, 2.8, 0.62, 0.32)
+    loft(b, "Breech", [ring_x(4.06, GUN_Y, 7.1, prof), ring_x(6.95, GUN_Y, 7.1, prof),
+                       ring_x(7.46, GUN_Y, 7.1, prof, 0.84)], "Steel_Dark")
+    prof = chamf(2.24, 2.66, 0.55, 0.38)
+    loft(b, "BreechFront", [ring_x(1.6, GUN_Y, 6.75, prof, 0.82), ring_x(2.45, GUN_Y, 6.85, prof),
+                            ring_x(4.2, GUN_Y, 6.95, prof)], "Steel_Dark")
+    b.box("BackGrille", (0.06, 2.0, 1.9), (7.5, GUN_Y, 7.1), "Plastic_Black", bevel=0)
+
+
+def form_barrel(b):
+    # кожух ствола (восьмигранник внутри катушек), раструб гильзы к казённику, дульный тормоз
+    oc, big = octo_poly(0.7), octo_poly(1.3)
+    loft(b, "Shroud", [ring_gun(-0.95, oc), ring_gun(4.7, oc), ring_gun(5.25, big), ring_gun(8.4, big),
+                       ring_gun(8.6, big, 0.9)], "Steel_Dark")
+    for t in (5.25, 6.0, 6.75, 7.5):  # рёбра раструба
+        loft(b, "SleeveRib", [ring_gun(t, octo_poly(1.42)), ring_gun(t + 0.22, octo_poly(1.42))], "Steel_Mid")
+    loft(b, "MuzzleBrake", [ring_gun(-0.8, octo_poly(0.86)), ring_gun(-1.0, octo_poly(1.06)),
+                            ring_gun(-1.85, octo_poly(1.06)), ring_gun(-2.08, octo_poly(1.16)),
+                            ring_gun(-2.12, octo_poly(1.0))], "Steel_Mid")
+    for t in (-1.2, -1.58):  # прорези тормоза по бокам и светящиеся отдушины сверху
+        for s in (-1, 1):
+            slot_gun(b, "BrakeSlot", t, s * 1.08, 0, 0.22, 0.05, 0.84, "Plastic_Black")
+        slot_gun(b, "Glow_BrakeVent", t, 0, 1.08, 0.2, 0.6, 0.04, "Accent")
+    loft(b, "MuzzleBore", [ring_gun(-2.0, octo_poly(0.45)), ring_gun(-2.15, octo_poly(0.45))], "Plastic_Black")
 
 
 def detail_l1(b):
-    lv = b.lv
-    # --- тумба: цоколь шире корпуса, решётки на прямых гранях, неоновые щели на косых
-    b.prism("OctoPlinth", b.ngon(8, (OCTO_R + 0.14) / math.cos(math.pi / 8), math.pi / 8), 0.3, "Steel_Mid",
-            Matrix.Translation(BASE_C - Vector((0, 0, 0.0))))
-    for k in range(8):
-        a = 2 * math.pi * k / 8
-        rot = Matrix.Rotation(a, 4, "Z")
-        if k % 2 == 0:
-            b.box("Grille", (0.1, 2.6, 0.6), BASE_C + rot @ Vector((OCTO_R + 0.02, 0, 0.95)), "Plastic_Black", rot)
-            slats = 4 if lv.n == 1 else 6
-            for s in range(slats):
-                y = -1.1 + 2.2 * s / (slats - 1)
-                b.box("GrilleSlat", (0.1, 0.14, 0.54), BASE_C + rot @ Vector((OCTO_R + 0.05, y, 0.95)), "Steel_Light", rot,
-                      bevel=0)
-        else:
-            b.box("Glow_Base", (0.08, 1.4, 0.12), BASE_C + rot @ Vector((OCTO_R + 0.03, 0, 1.1)), "Accent", rot)
-    # --- поворотный стол: неоновое кольцо по кромке и болты
-    b.ring("Glow_Turntable", TT_R + 0.03, TT_R - 0.1, 0.07, BASE_C + Vector((0, 0, TT_Z)), "Accent")
-    nb = 8 if lv.n == 1 else 16
-    for k in range(nb):
-        a = 2 * math.pi * (k + 0.5) / nb
-        p = BASE_C + Vector((4.05 * math.cos(a), 4.05 * math.sin(a), 2.24))
-        if (p - FLASK).to_2d().length > 2.0:
-            b.bolt("Bolt", p)
-    # --- колба: ступица и неоновое кольцо на крышке
-    b.cyl("FlaskCapHub", 0.75, 0.2, FLASK + Vector((0, 0, 6.35)), "Steel_Mid")
-    b.ring("Glow_Cap", 1.15, 0.98, 0.04, FLASK + Vector((0, 0, 6.27)), "Accent")
-    # --- казённик: чёрная решётка между задними рёбрами, штуцеры трубок
-    b.box("BackGrille", (0.06, 2.3, 2.0), (7.44, GUN_Y, 7.1), "Plastic_Black")
-    for dy in (-0.8, 0, 0.8):
-        for x in (4.45, 7.05):
-            b.cyl("TubeFitting", 0.3, 0.14, (x, GUN_Y + dy, 8.56), "Steel_Light", bevel=0)
-    # --- ствол: тёмное отверстие в дульном кольце
-    o = b.cyl("MuzzleBore", 0.42, 0.2, (0, 0, 0), "Plastic_Black")
-    o.matrix_world = gun_m(-1.68)  # торец дульного кольца
-    # фаски на острых авторских брусках, мелочь легче
-    bevel_existing(b, ("Strut", "FlaskRib", "BarrelTop", "BarrelBottom", "Rail", "SideCover", "SideShield",
-                       "MiniBarrel", "LegRightRib_Cap"), 0.05)
-    lighten(b, ("Coil",), 0.5)
-    lighten(b, ("LiquidTube",), 0.5)
-    lighten(b, ("Wire",), 0.4)
+    form_base(b)
+    form_flask(b)
+    form_arm(b)
+    form_breech(b)
+    form_barrel(b)
 
 
 def detail_l2(b):
-    # --- тумба: бронеплиты с болтами на прямых гранях
-    for k in range(0, 8, 2):
-        a = 2 * math.pi * k / 8
-        rot = Matrix.Rotation(a, 4, "Z")
-        b.box("SkirtPlate", (0.14, 3.4, 0.36), BASE_C + rot @ Vector((OCTO_R + 0.07, 0, 0.42)), "Steel_Mid", rot)
-        for y in (-1.5, 1.5):
-            b.bolt("Bolt", BASE_C + rot @ Vector((OCTO_R + 0.15, y, 0.42)), axis="X", r=0.08)
-    # --- колба: втулки на стойках, раскосы клетки, болты на воротнике
-    for sx, sy in ((1, 1), (1, -1), (-1, -1), (-1, 1)):
-        p = FLASK + Vector((1.08 * sx, 1.08 * sy, 0))
-        for z in (2.45, 5.7):
-            b.box("StrutSleeve", (0.78, 0.78, 0.24), p + Vector((0, 0, z)), "Steel_Mid")
-    for k in range(4):
-        a0 = math.pi / 4 + k * math.pi / 2
-        a1 = a0 + math.pi / 2
-        r = 1.53
-        p0 = FLASK + Vector((r * math.cos(a0), r * math.sin(a0), 2.9))
-        p1 = FLASK + Vector((r * math.cos(a1), r * math.sin(a1), 4.9))
-        d = p1 - p0
-        o = b.cyl("Brace", 0.05, d.length, (0, 0, 0), "Steel_Mid", seg=6, bevel=0)
-        o.matrix_world = Matrix.Translation((p0 + p1) / 2) @ d.to_track_quat("Z", "Y").to_matrix().to_4x4()
-    for k in range(6):
-        a = 2 * math.pi * k / 6
-        b.bolt("Bolt", FLASK + Vector((1.5 * math.cos(a), 1.5 * math.sin(a), 2.3)))
-    # --- ствол: хомуты на катушках, рёбра охлаждения за последней катушкой
-    for k in range(6):
-        o = b.ring("CoilClamp", 1.07, 0.95, 0.12, (0, 0, 0), "Steel_Light", bevel=0)
-        o.matrix_world = gun_m(1.334 * k - 0.4)
-    for k in range(4):
-        o = b.ring("CoolingFin", 1.62, 1.3, 0.09, (0, 0, 0), "Steel_Mid", bevel=0)
-        o.matrix_world = gun_m(7.15 + 0.38 * k)
-    # --- гидроцилиндр подъёма: от опорной плиты к стволу под второй катушкой
-    p0 = Vector((-1.7, GUN_Y, 2.55))
-    p1 = COIL0 + AXIS_DIR * 1.6 - Vector((0, 0, 1.05))
-    d = p1 - p0
-    rot = d.to_track_quat("Z", "Y").to_matrix().to_4x4()
-    for name, r, t0, t1, mat in (("HydBody", 0.26, 0.0, 0.58, "Steel_Light"), ("HydRod", 0.12, 0.5, 1.0, "Panel_Light")):
-        o = b.cyl(name, r, d.length * (t1 - t0), (0, 0, 0), mat)
-        o.matrix_world = Matrix.Translation(p0 + d * ((t0 + t1) / 2)) @ rot
-    for p in (p0, p1):
-        b.cyl("HydEye", 0.22, 0.5, p, "Steel_Mid", axis="Y")
-    # --- казённик: манометр на боку, болты на N-панелях
-    b.cyl("Gauge", 0.3, 0.12, (3.3, 2.62, 7.75), "Steel_Light", axis="Y")
-    b.cyl("GaugeFace", 0.23, 0.04, (3.3, 2.69, 7.75), "Panel_Light", axis="Y", bevel=0)
-    b.box("GaugeNeedle", (0.03, 0.02, 0.18), (3.3, 2.72, 7.8), "Accent")
-    for y in (2.96, -0.06):
-        for dx in (-1.1, 1.1):
-            for dz in (-0.8, 0.8):
-                b.bolt("Bolt", (5.76 + dx, y, 7.1 + dz), axis="Y", r=0.07)
+    # контрфорсы на косых гранях тумбы
+    for k in range(1, 8, 2):
+        a = math.pi / 4 * k
+        er = Vector((math.cos(a), math.sin(a), 0))
+        et = Vector((-math.sin(a), math.cos(a), 0))
+        prof = [(4.6, 0.0), (5.95, 0.0), (5.95, 0.22), (4.75, 1.5)]  # клин от цоколя к стенке
+        loft(b, "Buttress", [[BASE_C + er * r + et * w + Vector((0, 0, z)) for r, z in prof] for w in (-0.75, 0.75)],
+             "Steel_Mid")
+    # бронещитки по бокам казённика, слоем поверх корпуса
+    shield = [(1.9, 5.85), (4.1, 5.85), (4.4, 6.25), (4.4, 7.4), (3.9, 7.75), (2.3, 7.75), (1.9, 7.3)]
+    plate_xz(b, "BreechShield", shield, 0.12, 0.3, "Steel_Mid")
+    plate_xz(b, "BreechShield", shield, 2.6, 2.78, "Steel_Mid")
+    # корона на крышке колбы связывает лапы, навершие
+    b.ring("FlaskCrown", 1.42, 1.12, 0.26, FLASK + Vector((0, 0, 5.86)), "Steel_Mid", seg=32, bevel=0)
+    lathe_z(b, "FlaskCapTop", FLASK, [(0, 6.4), (0.42, 6.4), (0.42, 6.62), (0.3, 6.72), (0, 6.72)], "Steel_Mid", seg=16)
+    # перемычка между щеками стойки
+    o = b.box("ArmBridge", (0.7, 2.4, 0.5), (0, 0, 0), "Steel_Mid", bevel=0)
+    o.matrix_world = Matrix.Translation((2.9, GUN_Y, 4.9)) @ Matrix.Rotation(math.radians(-43), 4, "Y")
+    # хребет над кожухом от тормоза до раструба
+    loft(b, "ShroudSpine", [ring_gun(t, [(u, v + 1.0) for u, v in chamf(0.36, 0.3, 0.1, 0.0)]) for t in (-0.75, 4.9)],
+         "Steel_Mid")
 
 
 def build(n, mats):
     lv = Lv(n)
     b = Builder(lv, mats)
-    load_source(b, keep_extra=n >= 1)  # с L1 возвращаются авторские болты и провода из .blend
+    load_source(b, skip=REPLACED if n >= 1 else ())  # с L1 основные формы строятся заново
     if n >= 1:
         detail_l1(b)
     if n >= 2:
