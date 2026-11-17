@@ -18,6 +18,10 @@
   `prepare_beetles` печатает `tools/beetles/colors_lua.py` (`--lengths` — длины для его SPECS).
   Без Import 3D: `tools/upload_models.py` грузит .glb в Roblox (Open Cloud, ключ в `ROBLOX_API_KEY`),
   id — в `Модели/asset_ids.json`; агент вставляет их через MCP `insert_asset` и запускает `prepare_beetles`.
+- `Модели/Carrier/` — дрон-носильщик (исходник Hunyuan3D — `Модели/носилщик.fbx`): `carrier_clean.*` — доводка FBX
+  (`tools/carrier/clean_fbx.py`, нужен `pip install bpy`), `carrier_parts.glb` — то же кодом из деталей, как жуки
+  (`tools/carrier/build_carrier.py`), палитра и роль цвета по имени детали — `tools/carrier/palette.py`,
+  превью — `tools/carrier/render_preview.py` → `preview_compare.png`. В игру ещё не подключён (сейчас `CarrierRig`).
 - `Звуки/` — звуки игры (.ogg). Черновой набор собирает `tools/synth_sounds.py`, в Roblox их грузит
   `tools/upload_sounds.py` (нужен `ROBLOX_API_KEY`) и сам пишет id в `src/ReplicatedStorage/SoundIds.luau`.
 - `inbox/` — сюда автор заливает файлы через GitHub; агент раскладывает их по папкам.
